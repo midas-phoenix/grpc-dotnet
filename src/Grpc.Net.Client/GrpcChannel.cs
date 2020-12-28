@@ -19,11 +19,12 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
-using System.Threading;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Compression;
+using Grpc.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -40,9 +41,11 @@ namespace Grpc.Net.Client
 
         private readonly ConcurrentDictionary<IMethod, GrpcMethodInfo> _methodInfoCache;
         private readonly Func<IMethod, GrpcMethodInfo> _createMethodInfoFunc;
+        // Internal for testing
+        internal readonly HashSet<IDisposable> ActiveCalls;
 
         internal Uri Address { get; }
-        internal HttpClient HttpClient { get; }
+        internal HttpMessageInvoker HttpInvoker { get; }
         internal int? SendMaxMessageSize { get; }
         internal int? ReceiveMaxMessageSize { get; }
         internal ILoggerFactory LoggerFactory { get; }
@@ -54,7 +57,8 @@ namespace Grpc.Net.Client
         internal bool Disposed { get; private set; }
         // Timing related options that are set in unit tests
         internal ISystemClock Clock = SystemClock.Instance;
-        internal bool DisableClientDeadlineTimer { get; set; }
+        internal bool DisableClientDeadline;
+        internal long MaxTimerDueTime = uint.MaxValue - 1; // Max System.Threading.Timer due time
 
         private bool _shouldDisposeHttpClient;
 
@@ -62,13 +66,14 @@ namespace Grpc.Net.Client
         {
             _methodInfoCache = new ConcurrentDictionary<IMethod, GrpcMethodInfo>();
 
-            // Dispose the HttpClient if...
-            //   1. No client was specified and so the channel created the HttpClient itself
-            //   2. User has specified a client and set DisposeHttpClient to true
-            _shouldDisposeHttpClient = channelOptions.HttpClient == null || channelOptions.DisposeHttpClient;
+            // Dispose the HTTP client/handler if...
+            //   1. No client/handler was specified and so the channel created the client itself
+            //   2. User has specified a client/handler and set DisposeHttpClient to true
+            _shouldDisposeHttpClient = (channelOptions.HttpClient == null && channelOptions.HttpHandler == null)
+                || channelOptions.DisposeHttpClient;
 
             Address = address;
-            HttpClient = channelOptions.HttpClient ?? CreateInternalHttpClient();
+            HttpInvoker = channelOptions.HttpClient ?? CreateInternalHttpInvoker(channelOptions.HttpHandler);
             SendMaxMessageSize = channelOptions.MaxSendMessageSize;
             ReceiveMaxMessageSize = channelOptions.MaxReceiveMessageSize;
             CompressionProviders = ResolveCompressionProviders(channelOptions.CompressionProviders);
@@ -76,6 +81,7 @@ namespace Grpc.Net.Client
             LoggerFactory = channelOptions.LoggerFactory ?? NullLoggerFactory.Instance;
             ThrowOperationCanceledOnCancellation = channelOptions.ThrowOperationCanceledOnCancellation;
             _createMethodInfoFunc = CreateMethodInfo;
+            ActiveCalls = new HashSet<IDisposable>();
 
             if (channelOptions.Credentials != null)
             {
@@ -89,21 +95,40 @@ namespace Grpc.Net.Client
             }
         }
 
-        private static HttpClient CreateInternalHttpClient()
+        private static HttpMessageInvoker CreateInternalHttpInvoker(HttpMessageHandler? handler)
         {
-            var httpClient = new HttpClient();
+            // HttpMessageInvoker should always dispose handler if Disposed is called on it.
+            // Decision to dispose invoker is controlled by _shouldDisposeHttpClient.
+            if (handler == null)
+            {
+                handler = HttpHandlerFactory.CreatePrimaryHandler();
+            }
 
-            // Long running server and duplex streaming gRPC requests may not
-            // return any messages for over 100 seconds, triggering a cancellation
-            // of HttpClient.SendAsync. Disable timeout in internally created
-            // HttpClient for channel.
-            //
-            // gRPC deadline should be the recommended way to timeout gRPC calls.
-            //
-            // https://github.com/dotnet/corefx/issues/41650
-            httpClient.Timeout = Timeout.InfiniteTimeSpan;
+#if NET5_0
+            handler = HttpHandlerFactory.EnsureTelemetryHandler(handler);
+#endif
 
-            return httpClient;
+            // Use HttpMessageInvoker instead of HttpClient because it is faster
+            // and we don't need client's features.
+            var httpInvoker = new HttpMessageInvoker(handler, disposeHandler: true);
+
+            return httpInvoker;
+        }
+
+        internal void RegisterActiveCall(IDisposable grpcCall)
+        {
+            lock (ActiveCalls)
+            {
+                ActiveCalls.Add(grpcCall);
+            }
+        }
+
+        internal void FinishActiveCall(IDisposable grpcCall)
+        {
+            lock (ActiveCalls)
+            {
+                ActiveCalls.Remove(grpcCall);
+            }
         }
 
         internal GrpcMethodInfo GetCachedGrpcMethodInfo(IMethod method)
@@ -260,6 +285,12 @@ namespace Grpc.Net.Client
                 throw new ArgumentNullException(nameof(channelOptions));
             }
 
+            if (channelOptions.HttpClient != null && channelOptions.HttpHandler != null)
+            {
+                throw new ArgumentException($"{nameof(GrpcChannelOptions.HttpClient)} and {nameof(GrpcChannelOptions.HttpHandler)} have been configured. " +
+                    $"Only one HTTP caller can be specified.");
+            }
+
             return new GrpcChannel(address, channelOptions);
         }
 
@@ -274,9 +305,24 @@ namespace Grpc.Net.Client
                 return;
             }
 
+            lock (ActiveCalls)
+            {
+                if (ActiveCalls.Count > 0)
+                {
+                    // Disposing a call will remove it from ActiveCalls. Need to take a copy
+                    // to avoid enumeration from being modified
+                    var activeCallsCopy = ActiveCalls.ToArray();
+
+                    foreach (var activeCall in activeCallsCopy)
+                    {
+                        activeCall.Dispose();
+                    }
+                }
+            }
+
             if (_shouldDisposeHttpClient)
             {
-                HttpClient.Dispose();
+                HttpInvoker.Dispose();
             }
             Disposed = true;
         }

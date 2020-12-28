@@ -47,11 +47,13 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
 
         public IList<LogRecord> Logs => _sink.GetLogs();
 
+        public void ClearLogs() => _sink.ClearLogs();
+
         public void Dispose()
         {
             _wrappedDisposable?.Dispose();
 
-            var results = _sink.GetLogs().Where(w => w.LogLevel >= LogLevel.Error || w.EventId.Name == "RpcConnectionError").ToList();
+            var results = _sink.GetLogs().Where(w => w.LogLevel >= LogLevel.Error).ToList();
 
             if (results.Count > 0 && ExpectedErrorsFilter != null)
             {

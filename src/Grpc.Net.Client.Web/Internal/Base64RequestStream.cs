@@ -78,12 +78,22 @@ namespace Grpc.Net.Client.Web.Internal
 
             while (data.Length >= 3)
             {
+                // Final encoded data length could exceed buffer length
+                // When this happens the data will be encoded and WriteAsync in a loop
+                var encodeLength = Math.Min(data.Length, localBuffer.Length / 4 * 3);
+
                 EnsureSuccess(
-                    Base64.EncodeToUtf8(data.Span, localBuffer.Span, out var bytesConsumed, out var bytesWritten, isFinalBlock: false),
-                    OperationStatus.NeedMoreData);
+                    Base64.EncodeToUtf8(data.Span.Slice(0, encodeLength), localBuffer.Span, out var bytesConsumed, out var bytesWritten, isFinalBlock: false),
+#if NETSTANDARD2_1
+                    OperationStatus.NeedMoreData
+#else
+                    // React to fix https://github.com/dotnet/runtime/pull/281
+                    encodeLength == bytesConsumed ? OperationStatus.Done : OperationStatus.NeedMoreData
+#endif
+                    );
 
                 var base64Remainder = _buffer.Length - localBuffer.Length;
-                await _inner.WriteAsync(_buffer.AsMemory(0, bytesWritten + base64Remainder), cancellationToken);
+                await _inner.WriteAsync(_buffer.AsMemory(0, bytesWritten + base64Remainder), cancellationToken).ConfigureAwait(false);
 
                 data = data.Slice(bytesConsumed);
                 localBuffer = _buffer;
@@ -93,7 +103,7 @@ namespace Grpc.Net.Client.Web.Internal
             // If there was not enough data to write along with remainder then write it here
             if (localBuffer.Length < _buffer.Length)
             {
-                await _inner.WriteAsync(_buffer.AsMemory(0, 4), cancellationToken);
+                await _inner.WriteAsync(_buffer.AsMemory(0, 4), cancellationToken).ConfigureAwait(false);
             }
 
             if (data.Length > 0)
@@ -109,21 +119,25 @@ namespace Grpc.Net.Client.Web.Internal
         {
             if (status != expectedStatus)
             {
-                throw new InvalidOperationException("Error encoding content to base64: " + status);
+                throw new InvalidOperationException($"Error encoding content to base64. Expected status: {expectedStatus}, actual status: {status}.");
             }
         }
 
         public override async Task FlushAsync(CancellationToken cancellationToken)
         {
+            await WriteRemainderAsync(cancellationToken).ConfigureAwait(false);
+            await _inner.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        internal async Task WriteRemainderAsync(CancellationToken cancellationToken)
+        {
             if (_remainder > 0)
             {
                 EnsureSuccess(Base64.EncodeToUtf8InPlace(_buffer, _remainder, out var bytesWritten));
 
-                await _inner.WriteAsync(_buffer.AsMemory(0, bytesWritten), cancellationToken);
+                await _inner.WriteAsync(_buffer.AsMemory(0, bytesWritten), cancellationToken).ConfigureAwait(false);
                 _remainder = 0;
             }
-
-            await _inner.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
 
         protected override void Dispose(bool disposing)
@@ -138,7 +152,7 @@ namespace Grpc.Net.Client.Web.Internal
             base.Dispose(disposing);
         }
 
-        #region Stream implementation
+#region Stream implementation
         public override bool CanRead => _inner.CanRead;
         public override bool CanSeek => _inner.CanSeek;
         public override bool CanWrite => _inner.CanWrite;
@@ -172,9 +186,9 @@ namespace Grpc.Net.Client.Web.Internal
         public override void Write(byte[] buffer, int offset, int count)
         {
             // Used by unit tests
-            WriteAsync(buffer.AsMemory(0, count)).GetAwaiter().GetResult();
+            WriteAsync(buffer.AsMemory(0, count)).AsTask().GetAwaiter().GetResult();
             FlushAsync().GetAwaiter().GetResult();
         }
-        #endregion
+#endregion
     }
 }

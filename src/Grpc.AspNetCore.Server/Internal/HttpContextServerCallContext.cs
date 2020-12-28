@@ -39,6 +39,7 @@ namespace Grpc.AspNetCore.Server.Internal
         private Metadata? _responseTrailers;
         private Status _status;
         private AuthContext? _authContext;
+        private Activity? _activity;
         // Internal for tests
         internal ServerCallDeadlineManager? DeadlineManager;
         private HttpContextSerializationContext? _serializationContext;
@@ -71,7 +72,7 @@ namespace Grpc.AspNetCore.Server.Internal
 
         internal bool HasResponseTrailers => _responseTrailers != null;
 
-        protected override string MethodCore => HttpContext.Request.Path.Value;
+        protected override string MethodCore => HttpContext.Request.Path.Value!;
 
         protected override string HostCore => HttpContext.Request.Host.Value;
 
@@ -79,12 +80,25 @@ namespace Grpc.AspNetCore.Server.Internal
         {
             get
             {
+                // Follows the standard at https://github.com/grpc/grpc/blob/master/doc/naming.md
                 if (_peer == null)
                 {
                     var connection = HttpContext.Connection;
                     if (connection.RemoteIpAddress != null)
                     {
-                        _peer = (connection.RemoteIpAddress.AddressFamily == AddressFamily.InterNetwork ? "ipv4:" : "ipv6:") + connection.RemoteIpAddress + ":" + connection.RemotePort;
+                        switch (connection.RemoteIpAddress.AddressFamily)
+                        {
+                            case AddressFamily.InterNetwork:
+                                _peer = "ipv4:" + connection.RemoteIpAddress + ":" + connection.RemotePort;
+                                break;
+                            case AddressFamily.InterNetworkV6:
+                                _peer = "ipv6:[" + connection.RemoteIpAddress + "]:" + connection.RemotePort;
+                                break;
+                            default:
+                                // TODO(JamesNK) - Test what should be output when used with UDS and named pipes
+                                _peer = "unknown:" + connection.RemoteIpAddress + ":" + connection.RemotePort;
+                                break;
+                        }
                     }
                 }
 
@@ -104,13 +118,12 @@ namespace Grpc.AspNetCore.Server.Internal
 
                     foreach (var header in HttpContext.Request.Headers)
                     {
-                        // gRPC metadata contains a subset of the request headers
-                        // Filter out pseudo headers (start with :) and other known headers
-                        if (header.Key.StartsWith(':') || GrpcProtocolConstants.FilteredHeaders.Contains(header.Key))
+                        if (GrpcProtocolHelpers.ShouldSkipHeader(header.Key))
                         {
                             continue;
                         }
-                        else if (header.Key.EndsWith(Metadata.BinaryHeaderSuffix, StringComparison.OrdinalIgnoreCase))
+
+                        if (header.Key.EndsWith(Metadata.BinaryHeaderSuffix, StringComparison.OrdinalIgnoreCase))
                         {
                             _requestHeaders.Add(header.Key, GrpcProtocolHelpers.ParseBinaryHeader(header.Value));
                         }
@@ -133,6 +146,8 @@ namespace Grpc.AspNetCore.Server.Internal
                 return Task.CompletedTask;
             }
 
+            // Could have a fast path for no deadline being raised when an error happens,
+            // but it isn't worth the complexity.
             return ProcessHandlerErrorAsyncCore(ex, method);
         }
 
@@ -140,7 +155,10 @@ namespace Grpc.AspNetCore.Server.Internal
         {
             Debug.Assert(DeadlineManager != null, "Deadline manager should have been created.");
 
-            await DeadlineManager.Lock.WaitAsync();
+            if (!DeadlineManager.TrySetCallComplete())
+            {
+                await DeadlineManager.WaitDeadlineCompleteAsync();
+            }
 
             try
             {
@@ -148,8 +166,8 @@ namespace Grpc.AspNetCore.Server.Internal
             }
             finally
             {
-                DeadlineManager.Lock.Release();
                 await DeadlineManager.DisposeAsync();
+                GrpcServerLog.DeadlineStopped(Logger);
             }
         }
 
@@ -176,18 +194,21 @@ namespace Grpc.AspNetCore.Server.Internal
                 GrpcServerLog.ErrorExecutingServiceMethod(Logger, method, ex);
 
                 var message = ErrorMessageHelper.BuildErrorMessage("Exception was thrown by handler.", ex, Options.EnableDetailedErrors);
-                _status = new Status(StatusCode.Unknown, message);
+
+                // Note that the exception given to status won't be returned to the client.
+                // It is still useful to set in case an interceptor accesses the status on the server.
+                _status = new Status(StatusCode.Unknown, message, ex);
             }
 
-            // Don't update trailers if request has exceeded deadline/aborted
-            if (!CancellationToken.IsCancellationRequested)
+            // Don't update trailers if request has exceeded deadline
+            if (DeadlineManager == null || !DeadlineManager.IsDeadlineExceededStarted)
             {
                 HttpContext.Response.ConsolidateTrailers(this);
             }
 
-            LogCallEnd();
+            DeadlineManager?.SetCallEnded();
 
-            DeadlineManager?.SetCallComplete();
+            LogCallEnd();
         }
 
         // If there is a deadline then we need to have our own cancellation token.
@@ -221,67 +242,53 @@ namespace Grpc.AspNetCore.Server.Internal
                 EndCallCore();
                 return Task.CompletedTask;
             }
-
-            var lockTask = DeadlineManager.Lock.WaitAsync();
-            if (lockTask.IsCompletedSuccessfully)
+            else if (DeadlineManager.TrySetCallComplete())
             {
-                Task disposeTask;
-                try
-                {
-                    EndCallCore();
-                }
-                finally
-                {
-                    DeadlineManager.Lock.Release();
-
-                    // Can't return from a finally
-                    disposeTask = DeadlineManager.DisposeAsync().AsTask();
-                }
-
-                return disposeTask;
+                // Fast path when deadline hasn't been raised.
+                EndCallCore();
+                GrpcServerLog.DeadlineStopped(Logger);
+                return DeadlineManager.DisposeAsync().AsTask();
             }
-            else
-            {
-                return EndCallAsyncCore(lockTask);
-            }
+
+            // Deadline is exceeded
+            return EndCallAsyncCore();
         }
 
-        private async Task EndCallAsyncCore(Task lockTask)
+        private async Task EndCallAsyncCore()
         {
             Debug.Assert(DeadlineManager != null, "Deadline manager should have been created.");
 
-            await lockTask;
-
             try
             {
+                // Deadline has started
+                await DeadlineManager.WaitDeadlineCompleteAsync();
+
                 EndCallCore();
+                DeadlineManager.SetCallEnded();
+                GrpcServerLog.DeadlineStopped(Logger);
             }
             finally
             {
-                DeadlineManager.Lock.Release();
                 await DeadlineManager.DisposeAsync();
             }
         }
 
         private void EndCallCore()
         {
-            // Don't set trailers if deadline exceeded or request aborted
-            if (!CancellationToken.IsCancellationRequested)
+            // Don't update trailers if request has exceeded deadline
+            if (DeadlineManager == null || !DeadlineManager.IsDeadlineExceededStarted)
             {
                 HttpContext.Response.ConsolidateTrailers(this);
             }
 
             LogCallEnd();
-
-            DeadlineManager?.SetCallComplete();
         }
 
         private void LogCallEnd()
         {
-            var activity = GetHostActivity();
-            if (activity != null)
+            if (_activity != null)
             {
-                activity.AddTag(GrpcServerConstants.ActivityStatusCodeTag, _status.StatusCode.ToTrailerString());
+                _activity.AddTag(GrpcServerConstants.ActivityStatusCodeTag, _status.StatusCode.ToTrailerString());
             }
             if (_status.StatusCode != StatusCode.OK)
             {
@@ -315,7 +322,7 @@ namespace Grpc.AspNetCore.Server.Internal
 
         public ServerCallContext ServerCallContext => this;
 
-        protected override IDictionary<object, object> UserStateCore => HttpContext.Items;
+        protected override IDictionary<object, object> UserStateCore => HttpContext.Items!;
 
         internal bool HasBufferedMessage { get; set; }
 
@@ -349,14 +356,8 @@ namespace Grpc.AspNetCore.Server.Internal
                     }
                     else
                     {
-                        if (entry.IsBinary)
-                        {
-                            HttpContext.Response.Headers[entry.Key] = Convert.ToBase64String(entry.ValueBytes);
-                        }
-                        else
-                        {
-                            HttpContext.Response.Headers[entry.Key] = entry.Value;
-                        }
+                        var encodedValue = entry.IsBinary ? Convert.ToBase64String(entry.ValueBytes) : entry.Value;
+                        HttpContext.Response.Headers.Append(entry.Key, encodedValue);
                     }
                 }
             }
@@ -367,10 +368,10 @@ namespace Grpc.AspNetCore.Server.Internal
         // Clock is for testing
         public void Initialize(ISystemClock? clock = null)
         {
-            var activity = GetHostActivity();
-            if (activity != null)
+            _activity = GetHostActivity();
+            if (_activity != null)
             {
-                activity.AddTag(GrpcServerConstants.ActivityMethodTag, MethodCore);
+                _activity.AddTag(GrpcServerConstants.ActivityMethodTag, MethodCore);
             }
 
             GrpcEventSource.Log.CallStart(MethodCore);
@@ -379,22 +380,24 @@ namespace Grpc.AspNetCore.Server.Internal
 
             if (timeout != TimeSpan.Zero)
             {
-                DeadlineManager = new ServerCallDeadlineManager(clock ?? SystemClock.Instance, timeout, DeadlineExceededAsync, HttpContext.RequestAborted);
+                DeadlineManager = new ServerCallDeadlineManager(this, clock ?? SystemClock.Instance, timeout);
+                GrpcServerLog.DeadlineStarted(Logger, timeout);
             }
 
             var serviceDefaultCompression = Options.ResponseCompressionAlgorithm;
             if (serviceDefaultCompression != null &&
-                !string.Equals(serviceDefaultCompression, GrpcProtocolConstants.IdentityGrpcEncoding, StringComparison.Ordinal) &&
+                !GrpcProtocolConstants.IsGrpcEncodingIdentity(serviceDefaultCompression) &&
                 IsEncodingInRequestAcceptEncoding(serviceDefaultCompression))
             {
                 ResponseGrpcEncoding = serviceDefaultCompression;
             }
-            else
-            {
-                ResponseGrpcEncoding = GrpcProtocolConstants.IdentityGrpcEncoding;
-            }
 
-            HttpContext.Response.Headers.Append(GrpcProtocolConstants.MessageEncodingHeader, ResponseGrpcEncoding);
+            // grpc-encoding response header is optional and is inferred as 'identity' when not present.
+            // Only write a non-identity value for performance.
+            if (ResponseGrpcEncoding != null)
+            {
+                HttpContext.Response.Headers[GrpcProtocolConstants.MessageEncodingHeader] = ResponseGrpcEncoding;
+            }
         }
 
         private Activity? GetHostActivity()
@@ -419,11 +422,16 @@ namespace Grpc.AspNetCore.Server.Internal
         {
             if (HttpContext.Request.Headers.TryGetValue(GrpcProtocolConstants.TimeoutHeader, out var values))
             {
-                // CancellationTokenSource does not support greater than int.MaxValue milliseconds
                 if (GrpcProtocolHelpers.TryDecodeTimeout(values, out var timeout) &&
-                    timeout > TimeSpan.Zero &&
-                    timeout.TotalMilliseconds <= int.MaxValue)
+                    timeout > TimeSpan.Zero)
                 {
+                    if (timeout.Ticks > GrpcProtocolConstants.MaxDeadlineTicks)
+                    {
+                        GrpcServerLog.DeadlineTimeoutTooLong(Logger, timeout);
+
+                        timeout = TimeSpan.FromTicks(GrpcProtocolConstants.MaxDeadlineTicks);
+                    }
+
                     return timeout;
                 }
 
@@ -433,47 +441,40 @@ namespace Grpc.AspNetCore.Server.Internal
             return TimeSpan.Zero;
         }
 
-        private async Task DeadlineExceededAsync()
+        internal async Task DeadlineExceededAsync()
         {
-            try
+            GrpcServerLog.DeadlineExceeded(Logger, GetTimeout());
+            GrpcEventSource.Log.CallDeadlineExceeded();
+
+            var status = new Status(StatusCode.DeadlineExceeded, "Deadline Exceeded");
+
+            var trailersDestination = GrpcProtocolHelpers.GetTrailersDestination(HttpContext.Response);
+            GrpcProtocolHelpers.SetStatus(trailersDestination, status);
+
+            _status = status;
+
+            // Immediately send remaining response content and trailers
+            // If feature is null then reset/abort will still end request, but response won't have trailers
+            var completionFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
+            if (completionFeature != null)
             {
-                GrpcServerLog.DeadlineExceeded(Logger, GetTimeout());
-                GrpcEventSource.Log.CallDeadlineExceeded();
-
-                var status = new Status(StatusCode.DeadlineExceeded, "Deadline Exceeded");
-
-                var trailersDestination = GrpcProtocolHelpers.GetTrailersDestination(HttpContext.Response);
-                GrpcProtocolHelpers.SetStatus(trailersDestination, status);
-
-                _status = status;
-
-                // Immediately send remaining response content and trailers
-                // If feature is null then reset/abort will still end request, but response won't have trailers
-                var completionFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
-                if (completionFeature != null)
-                {
-                    await completionFeature.CompleteAsync();
-                }
-
-                // HttpResetFeature should always be set on context,
-                // but in case it isn't, fall back to HttpContext.Abort.
-                // Abort will send error code INTERNAL_ERROR instead of NO_ERROR.
-                var resetFeature = HttpContext.Features.Get<IHttpResetFeature>();
-                if (resetFeature != null)
-                {
-                    GrpcServerLog.ResettingResponse(Logger, GrpcProtocolConstants.ResetStreamNoError);
-                    resetFeature.Reset(GrpcProtocolConstants.ResetStreamNoError);
-                }
-                else
-                {
-                    // Note that some clients will fail with error code INTERNAL_ERROR.
-                    GrpcServerLog.AbortingResponse(Logger);
-                    HttpContext.Abort();
-                }
+                await completionFeature.CompleteAsync();
             }
-            catch (Exception ex)
+
+            // HttpResetFeature should always be set on context,
+            // but in case it isn't, fall back to HttpContext.Abort.
+            // Abort will send error code INTERNAL_ERROR instead of NO_ERROR.
+            var resetFeature = HttpContext.Features.Get<IHttpResetFeature>();
+            if (resetFeature != null)
             {
-                GrpcServerLog.DeadlineCancellationError(Logger, ex);
+                GrpcServerLog.ResettingResponse(Logger, GrpcProtocolConstants.ResetStreamNoError);
+                resetFeature.Reset(GrpcProtocolConstants.ResetStreamNoError);
+            }
+            else
+            {
+                // Note that some clients will fail with error code INTERNAL_ERROR.
+                GrpcServerLog.AbortingResponse(Logger);
+                HttpContext.Abort();
             }
         }
 
@@ -532,11 +533,11 @@ namespace Grpc.AspNetCore.Server.Internal
 
         internal void ValidateAcceptEncodingContainsResponseEncoding()
         {
-            Debug.Assert(ResponseGrpcEncoding != null);
+            var resolvedResponseGrpcEncoding = ResponseGrpcEncoding ?? GrpcProtocolConstants.IdentityGrpcEncoding;
 
-            if (!IsEncodingInRequestAcceptEncoding(ResponseGrpcEncoding))
+            if (!IsEncodingInRequestAcceptEncoding(resolvedResponseGrpcEncoding))
             {
-                GrpcServerLog.EncodingNotInAcceptEncoding(Logger, ResponseGrpcEncoding);
+                GrpcServerLog.EncodingNotInAcceptEncoding(Logger, resolvedResponseGrpcEncoding);
             }
         }
     }

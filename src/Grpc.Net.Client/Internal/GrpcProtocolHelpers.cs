@@ -20,9 +20,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using Grpc.Core;
 using Grpc.Net.Compression;
@@ -62,29 +64,56 @@ namespace Grpc.Net.Client.Internal
 
             foreach (var header in responseHeaders)
             {
-                // ASP.NET Core includes pseudo headers in the set of request headers
-                // whereas, they are not in gRPC implementations. We will filter them
-                // out when we construct the list of headers on the context.
-                if (header.Key.StartsWith(':'))
+                if (ShouldSkipHeader(header.Key))
                 {
                     continue;
                 }
-                // Exclude grpc related headers
-                if (header.Key.StartsWith("grpc-", StringComparison.OrdinalIgnoreCase))
+
+                foreach (var value in header.Value)
                 {
-                    continue;
-                }
-                else if (header.Key.EndsWith(Metadata.BinaryHeaderSuffix, StringComparison.OrdinalIgnoreCase))
-                {
-                    headers.Add(header.Key, GrpcProtocolHelpers.ParseBinaryHeader(string.Join(",", header.Value)));
-                }
-                else
-                {
-                    headers.Add(header.Key, string.Join(",", header.Value));
+                    if (header.Key.EndsWith(Metadata.BinaryHeaderSuffix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        headers.Add(header.Key, ParseBinaryHeader(value));
+                    }
+                    else
+                    {
+                        headers.Add(header.Key, value);
+                    }
                 }
             }
 
             return headers;
+        }
+
+        internal static bool ShouldSkipHeader(string name)
+        {
+            if (name.Length == 0)
+            {
+                return false;
+            }
+
+            switch (name[0])
+            {
+                case ':':
+                    // ASP.NET Core includes pseudo headers in the set of request headers
+                    // whereas, they are not in gRPC implementations. We will filter them
+                    // out when we construct the list of headers on the context.
+                    return true;
+                case 'g':
+                case 'G':
+                    // Exclude known grpc headers. This matches Grpc.Core client behavior.
+                    return string.Equals(name, GrpcProtocolConstants.StatusTrailer, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, GrpcProtocolConstants.MessageTrailer, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, GrpcProtocolConstants.MessageEncodingHeader, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, GrpcProtocolConstants.MessageAcceptEncodingHeader, StringComparison.OrdinalIgnoreCase);
+                case 'c':
+                case 'C':
+                    // Exclude known HTTP headers. This matches Grpc.Core client behavior.
+                    return string.Equals(name, "content-encoding", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, "content-type", StringComparison.OrdinalIgnoreCase);
+                default:
+                    return false;
+            }
         }
 
         private const int MillisecondsPerSecond = 1000;
@@ -269,7 +298,7 @@ namespace Grpc.Net.Client.Internal
         public static void AddHeader(HttpRequestHeaders headers, Metadata.Entry entry)
         {
             var value = entry.IsBinary ? Convert.ToBase64String(entry.ValueBytes) : entry.Value;
-            headers.Add(entry.Key, value);
+            headers.TryAddWithoutValidation(entry.Key, value);
         }
 
         public static string? GetHeaderValue(HttpHeaders? headers, string name)
@@ -311,7 +340,7 @@ namespace Grpc.Net.Client.Internal
             catch (Exception ex)
             {
                 // Handle error from parsing badly formed status
-                status = new Status(StatusCode.Cancelled, ex.Message);
+                status = new Status(StatusCode.Cancelled, ex.Message, ex);
             }
 
             return status.Value;
@@ -348,6 +377,30 @@ namespace Grpc.Net.Client.Internal
 
             status = new Status((StatusCode)statusValue, grpcMessage);
             return true;
+        }
+
+        public static StatusCode ResolveRpcExceptionStatusCode(Exception ex)
+        {
+            var current = ex;
+            do
+            {
+                // Grpc.Core tends to return Unavailable if there is a problem establishing the connection.
+                // Additional changes here are likely required for cases when Unavailable is being returned
+                // when it shouldn't be.
+                if (current is SocketException)
+                {
+                    // SocketError.ConnectionRefused happens when port is not available.
+                    // SocketError.HostNotFound happens when unknown host is specified.
+                    return StatusCode.Unavailable;
+                }
+                else if (current is IOException)
+                {
+                    // IOException happens if there is a protocol mismatch.
+                    return StatusCode.Unavailable;
+                }
+            } while ((current = current.InnerException) != null);
+
+            return StatusCode.Internal;
         }
     }
 }

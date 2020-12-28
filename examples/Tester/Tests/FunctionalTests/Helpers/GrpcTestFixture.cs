@@ -18,8 +18,6 @@
 
 using System;
 using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -62,37 +60,18 @@ namespace Tests.FunctionalTests.Helpers
             _host = builder.Start();
             _server = _host.GetTestServer();
 
-            // Need to set the response version to 2.0.
-            // Required because of this TestServer issue - https://github.com/aspnet/AspNetCore/issues/16940
-            var responseVersionHandler = new ResponseVersionHandler();
-            responseVersionHandler.InnerHandler = _server.CreateHandler();
-
-            var client = new HttpClient(responseVersionHandler);
-            client.BaseAddress = new Uri("http://localhost");
-
-            Client = client;
+            Handler = _server.CreateHandler();
         }
 
         public LoggerFactory LoggerFactory { get; }
 
-        public HttpClient Client { get; }
+        public HttpMessageHandler Handler { get; }
 
         public void Dispose()
         {
-            Client.Dispose();
+            Handler.Dispose();
             _host.Dispose();
             _server.Dispose();
-        }
-
-        private class ResponseVersionHandler : DelegatingHandler
-        {
-            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            {
-                var response = await base.SendAsync(request, cancellationToken);
-                response.Version = request.Version;
-
-                return response;
-            }
         }
 
         public IDisposable GetTestContext()

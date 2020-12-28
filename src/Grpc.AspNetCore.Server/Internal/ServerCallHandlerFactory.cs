@@ -50,7 +50,8 @@ namespace Grpc.AspNetCore.Server.Internal
             _globalOptions = globalOptions.Value;
         }
 
-        private MethodOptions CreateMethodOptions()
+        // Internal for testing
+        internal MethodOptions CreateMethodOptions()
         {
             return MethodOptions.Create(new[] { _globalOptions, _serviceOptions });
         }
@@ -101,16 +102,27 @@ namespace Grpc.AspNetCore.Server.Internal
 
             return httpContext =>
             {
+                // CORS preflight request should be handled by CORS middleware.
+                // If it isn't then return 404 from endpoint request delegate.
+                if (GrpcProtocolHelpers.IsCorsPreflightRequest(httpContext))
+                {
+                    httpContext.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return Task.CompletedTask;
+                }
+
                 GrpcProtocolHelpers.AddProtocolHeaders(httpContext.Response);
 
                 var unimplementedMethod = httpContext.Request.RouteValues["unimplementedMethod"]?.ToString() ?? "<unknown>";
                 Log.MethodUnimplemented(logger, unimplementedMethod);
-                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value);
+                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
 
                 GrpcProtocolHelpers.SetStatus(GrpcProtocolHelpers.GetTrailersDestination(httpContext.Response), new Status(StatusCode.Unimplemented, "Method is unimplemented."));
                 return Task.CompletedTask;
             };
         }
+
+        public bool IgnoreUnknownServices => _globalOptions.IgnoreUnknownServices ?? false;
+        public bool IgnoreUnknownMethods => _serviceOptions.IgnoreUnknownServices ?? _globalOptions.IgnoreUnknownServices  ?? false;
 
         public RequestDelegate CreateUnimplementedService()
         {
@@ -118,11 +130,19 @@ namespace Grpc.AspNetCore.Server.Internal
 
             return httpContext =>
             {
+                // CORS preflight request should be handled by CORS middleware.
+                // If it isn't then return 404 from endpoint request delegate.
+                if (GrpcProtocolHelpers.IsCorsPreflightRequest(httpContext))
+                {
+                    httpContext.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return Task.CompletedTask;
+                }
+
                 GrpcProtocolHelpers.AddProtocolHeaders(httpContext.Response);
 
                 var unimplementedService = httpContext.Request.RouteValues["unimplementedService"]?.ToString() ?? "<unknown>";
                 Log.ServiceUnimplemented(logger, unimplementedService);
-                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value);
+                GrpcEventSource.Log.CallUnimplemented(httpContext.Request.Path.Value!);
 
                 GrpcProtocolHelpers.SetStatus(GrpcProtocolHelpers.GetTrailersDestination(httpContext.Response), new Status(StatusCode.Unimplemented, "Service is unimplemented."));
                 return Task.CompletedTask;

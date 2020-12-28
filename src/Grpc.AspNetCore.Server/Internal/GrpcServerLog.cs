@@ -64,7 +64,7 @@ namespace Grpc.AspNetCore.Server.Internal
             LoggerMessage.Define(LogLevel.Trace, new EventId(13, "ReceivedMessage"), "Received message.");
 
         private static readonly Action<ILogger, Exception?> _errorReadingMessage =
-            LoggerMessage.Define(LogLevel.Error, new EventId(14, "ErrorReadingMessage"), "Error reading message.");
+            LoggerMessage.Define(LogLevel.Information, new EventId(14, "ErrorReadingMessage"), "Error reading message.");
 
         private static readonly Action<ILogger, Exception?> _sendingMessage =
             LoggerMessage.Define(LogLevel.Debug, new EventId(15, "SendingMessage"), "Sending message.");
@@ -73,7 +73,7 @@ namespace Grpc.AspNetCore.Server.Internal
             LoggerMessage.Define(LogLevel.Trace, new EventId(16, "MessageSent"), "Message sent.");
 
         private static readonly Action<ILogger, Exception?> _errorSendingMessage =
-            LoggerMessage.Define(LogLevel.Error, new EventId(17, "ErrorSendingMessage"), "Error sending message.");
+            LoggerMessage.Define(LogLevel.Information, new EventId(17, "ErrorSendingMessage"), "Error sending message.");
 
         private static readonly Action<ILogger, Type, int, Exception?> _serializedMessage =
             LoggerMessage.Define<Type, int>(LogLevel.Trace, new EventId(18, "SerializedMessage"), "Serialized '{MessageType}' to {MessageLength} byte message.");
@@ -92,6 +92,28 @@ namespace Grpc.AspNetCore.Server.Internal
 
         private static readonly Action<ILogger, Exception?> _unhandledCorsPreflightRequest =
            LoggerMessage.Define(LogLevel.Information, new EventId(23, "UnhandledCorsPreflightRequest"), "Unhandled CORS preflight request received. CORS may not be configured correctly in the application.");
+
+        private static readonly Action<ILogger, TimeSpan, Exception?> _deadlineTimeoutTooLong =
+            LoggerMessage.Define<TimeSpan>(LogLevel.Debug, new EventId(24, "DeadlineTimeoutTooLong"), "Deadline timeout {Timeout} is above maximum allowed timeout of 99999999 seconds. Maximum timeout will be used.");
+
+        private static readonly Action<ILogger, TimeSpan, Exception?> _deadlineTimerRescheduled =
+            LoggerMessage.Define<TimeSpan>(LogLevel.Trace, new EventId(25, "DeadlineTimerRescheduled"), "Deadline timer triggered but {Remaining} remaining before deadline exceeded. Deadline timer rescheduled.");
+
+        private static readonly Action<ILogger, TimeSpan, Exception?> _deadlineStarted =
+            LoggerMessage.Define<TimeSpan>(LogLevel.Trace, new EventId(26, "DeadlineStarted"), "Request deadline timeout of {Timeout} started.");
+
+        private static readonly Action<ILogger, Exception?> _deadlineStopped =
+            LoggerMessage.Define(LogLevel.Trace, new EventId(27, "DeadlineStopped"), "Request deadline stopped.");
+
+        internal static void DeadlineStopped(ILogger logger)
+        {
+            _deadlineStopped(logger, null);
+        }
+
+        public static void DeadlineStarted(ILogger logger, TimeSpan timeout)
+        {
+            _deadlineStarted(logger, timeout, null);
+        }
 
         public static void DeadlineExceeded(ILogger logger, TimeSpan timeout)
         {
@@ -206,6 +228,16 @@ namespace Grpc.AspNetCore.Server.Internal
         public static void UnhandledCorsPreflightRequest(ILogger logger)
         {
             _unhandledCorsPreflightRequest(logger, null);
+        }
+
+        public static void DeadlineTimeoutTooLong(ILogger logger, TimeSpan timeout)
+        {
+            _deadlineTimeoutTooLong(logger, timeout, null);
+        }
+
+        public static void DeadlineTimerRescheduled(ILogger logger, TimeSpan remaining)
+        {
+            _deadlineTimerRescheduled(logger, remaining, null);
         }
     }
 }

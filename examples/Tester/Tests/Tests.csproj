@@ -1,14 +1,14 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netcoreapp3.0</TargetFramework>
+    <TargetFramework>net5.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
 
     <PackageReference Include="Grpc.Net.Client" Version="$(GrpcDotNetPackageVersion)" />
-    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="$(MicrosoftAspNetCorePackageVersion)" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="$(MicrosoftAspNetCoreAppPackageVersion)" />
 
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(MicrosoftNETTestSdkPackageVersion)" />
     <PackageReference Include="NUnit" Version="$(NunitPackageVersion)" />
@@ -18,4 +18,5 @@
   <ItemGroup>
     <ProjectReference Include="..\Server\Server.csproj" />
   </ItemGroup>
+
 </Project>

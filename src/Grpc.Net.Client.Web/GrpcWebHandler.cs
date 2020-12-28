@@ -37,8 +37,46 @@ namespace Grpc.Net.Client.Web
     /// </remarks>
     public sealed class GrpcWebHandler : DelegatingHandler
     {
-        private readonly GrpcWebMode _mode;
-        private readonly Version? _httpVersion;
+        internal const string WebAssemblyEnableStreamingResponseKey = "WebAssemblyEnableStreamingResponse";
+
+        /// <summary>
+        /// Gets or sets the HTTP version to use when making gRPC-Web calls.
+        /// <para>
+        /// When a <see cref="Version"/> is specified the value will be set on <see cref="HttpRequestMessage.Version"/>
+        /// as gRPC-Web calls are made. Changing this property allows the HTTP version of gRPC-Web calls to
+        /// be overridden.
+        /// </para>
+        /// </summary>
+        public Version? HttpVersion { get; set; }
+
+        /// <summary>
+        /// Gets or sets the gRPC-Web mode to use when making gRPC-Web calls.
+        /// <para>
+        /// When <see cref="GrpcWebMode.GrpcWeb"/>, gRPC-Web calls are made with the <c>application/grpc-web</c> content type,
+        /// and binary gRPC messages are sent and received.
+        /// </para>
+        /// <para>
+        /// When <see cref="GrpcWebMode.GrpcWebText"/>, gRPC-Web calls are made with the <c>application/grpc-web-text</c> content type,
+        /// and base64 encoded gRPC messages are sent and received. Base64 encoding is required for gRPC-Web server streaming calls
+        /// to stream correctly in browser apps.
+        /// </para>
+        /// </summary>
+        public GrpcWebMode GrpcWebMode { get; set; }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="GrpcWebHandler"/>.
+        /// </summary>
+        public GrpcWebHandler()
+        {
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="GrpcWebHandler"/>.
+        /// </summary>
+        /// <param name="innerHandler">The inner handler which is responsible for processing the HTTP response messages.</param>
+        public GrpcWebHandler(HttpMessageHandler innerHandler) : base(innerHandler)
+        {
+        }
 
         /// <summary>
         /// Creates a new instance of <see cref="GrpcWebHandler"/>.
@@ -46,7 +84,7 @@ namespace Grpc.Net.Client.Web
         /// <param name="mode">The gRPC-Web mode to use when making gRPC-Web calls.</param>
         public GrpcWebHandler(GrpcWebMode mode)
         {
-            _mode = mode;
+            GrpcWebMode = mode;
         }
 
         /// <summary>
@@ -56,40 +94,7 @@ namespace Grpc.Net.Client.Web
         /// <param name="innerHandler">The inner handler which is responsible for processing the HTTP response messages.</param>
         public GrpcWebHandler(GrpcWebMode mode, HttpMessageHandler innerHandler) : base(innerHandler)
         {
-            _mode = mode;
-        }
-
-        /// <summary>
-        /// Creates a new instance of <see cref="GrpcWebHandler"/>.
-        /// </summary>
-        /// <param name="mode">The gRPC-Web mode to use when making gRPC-Web calls.</param>
-        /// <param name="httpVersion">The HTTP version to used when making gRPC-Web calls.</param>
-        public GrpcWebHandler(GrpcWebMode mode, Version httpVersion)
-        {
-            if (httpVersion == null)
-            {
-                throw new ArgumentNullException(nameof(httpVersion));
-            }
-
-            _mode = mode;
-            _httpVersion = httpVersion;
-        }
-
-        /// <summary>
-        /// Creates a new instance of <see cref="GrpcWebHandler"/>.
-        /// </summary>
-        /// <param name="mode">The gRPC-Web mode to use when making gRPC-Web calls.</param>
-        /// <param name="httpVersion">The HTTP version to used when making gRPC-Web calls.</param>
-        /// <param name="innerHandler">The inner handler which is responsible for processing the HTTP response messages.</param>
-        public GrpcWebHandler(GrpcWebMode mode, Version httpVersion, HttpMessageHandler innerHandler) : base(innerHandler)
-        {
-            if (httpVersion == null)
-            {
-                throw new ArgumentNullException(nameof(httpVersion));
-            }
-
-            _mode = mode;
-            _httpVersion = httpVersion;
+            GrpcWebMode = mode;
         }
 
         /// <summary>
@@ -110,32 +115,62 @@ namespace Grpc.Net.Client.Web
 
         private async Task<HttpResponseMessage> SendAsyncCore(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            request.Content = new GrpcWebRequestContent(request.Content, _mode);
-            if (_httpVersion != null)
+            request.Content = new GrpcWebRequestContent(request.Content!, GrpcWebMode);
+
+            // Set WebAssemblyEnableStreamingResponse to true on gRPC-Web request.
+            // https://github.com/mono/mono/blob/a0d69a4e876834412ba676f544d447ec331e7c01/sdks/wasm/framework/src/System.Net.Http.WebAssemblyHttpHandler/WebAssemblyHttpHandler.cs#L149
+            //
+            // This must be set so WASM will stream the response. Without this setting the WASM HTTP handler will only
+            // return content once the entire response has been downloaded. This breaks server streaming.
+            //
+            // https://github.com/mono/mono/issues/18718
+#pragma warning disable CS0618 // Type or member is obsolete
+            request.Properties[WebAssemblyEnableStreamingResponseKey] = true;
+#pragma warning restore CS0618 // Type or member is obsolete
+
+            if (HttpVersion != null)
             {
-                request.Version = _httpVersion;
+                // This doesn't guarantee that the specified version is used. Some handlers will ignore it.
+                // For example, version in the browser always negotiated by the browser and HttpClient
+                // uses what the browser has negotiated.
+                request.Version = HttpVersion;
             }
+#if NET5_0
+            else if (request.RequestUri?.Scheme == Uri.UriSchemeHttps)
+            {
+                // If no explicit HttpVersion is set and the request is using TLS then default to HTTP/1.1.
+                // HTTP/1.1 together with HttpVersionPolicy.RequestVersionOrHigher it will be compatible
+                // with all endpoints.
+                request.Version = System.Net.HttpVersion.Version11;
+            }
+#endif
 
             var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
-            if (IsMatchingResponseContentType(_mode, response.Content.Headers.ContentType?.MediaType))
+            if (response.Content != null && IsMatchingResponseContentType(GrpcWebMode, response.Content.Headers.ContentType?.MediaType))
             {
-                response.Content = new GrpcWebResponseContent(response.Content, _mode, response.TrailingHeaders);
-                // The gRPC client validates HTTP version 2.0
-                response.Version = HttpVersion.Version20;
+                response.Content = new GrpcWebResponseContent(response.Content, GrpcWebMode, response.TrailingHeaders);
             }
+
+            // The gRPC client validates HTTP version 2.0 and will error if it isn't. Always set
+            // the version to 2.0, even for non-gRPC content type. The client maps HTTP status codes
+            // to gRPC statuses, e.g. HTTP 404 -> gRPC unimplemented.
+            //
+            // Note: Some handlers don't correctly set HttpResponseMessage.Version.
+            // We can't rely on it being set correctly. It is safest to always set it to 2.0.
+            response.Version = System.Net.HttpVersion.Version20;
 
             return response;
         }
 
         private static bool IsMatchingResponseContentType(GrpcWebMode mode, string? contentType)
         {
-            if (mode == GrpcWebMode.GrpcWeb)
+            if (mode == Web.GrpcWebMode.GrpcWeb)
             {
                 return CommonGrpcProtocolHelpers.IsContentType(GrpcWebProtocolConstants.GrpcWebContentType, contentType);
             }
 
-            if (mode == GrpcWebMode.GrpcWebText)
+            if (mode == Web.GrpcWebMode.GrpcWebText)
             {
                 return CommonGrpcProtocolHelpers.IsContentType(GrpcWebProtocolConstants.GrpcWebTextContentType, contentType);
             }

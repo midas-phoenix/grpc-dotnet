@@ -24,6 +24,7 @@ using System.IO.Pipelines;
 using System.Linq;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Grpc.AspNetCore.Server.Internal;
@@ -42,7 +43,7 @@ namespace Grpc.AspNetCore.Server.Tests
     public class HttpContextServerCallContextTests
     {
         [TestCase("127.0.0.1", 50051, "ipv4:127.0.0.1:50051")]
-        [TestCase("::1", 50051, "ipv6:::1:50051")]
+        [TestCase("::1", 50051, "ipv6:[::1]:50051")]
         public void Peer_FormatsRemoteAddressCorrectly(string ipAddress, int port, string expected)
         {
             // Arrange
@@ -340,6 +341,9 @@ namespace Grpc.AspNetCore.Server.Tests
         [TestCase("99999999m", 99999999 * TimeSpan.TicksPerMillisecond)]
         [TestCase("99999999u", 99999999 * TicksPerMicrosecond)]
         [TestCase("99999999n", 99999999 / NanosecondsPerTick)]
+        [TestCase("9999999H", GrpcProtocolConstants.MaxDeadlineTicks)]
+        [TestCase("99999999M", GrpcProtocolConstants.MaxDeadlineTicks)]
+        [TestCase("99999999S", GrpcProtocolConstants.MaxDeadlineTicks)]
         public void Deadline_ParseValidHeader_ReturnDeadline(string header, long ticks)
         {
             // Arrange
@@ -371,9 +375,6 @@ namespace Grpc.AspNetCore.Server.Tests
         [TestCase("1")]
         [TestCase("M")]
         [TestCase("1G")]
-        [TestCase("9999999H")] // too large for CancellationTokenSource
-        [TestCase("99999999M")] // too large for CancellationTokenSource
-        [TestCase("99999999S")] // too large for CancellationTokenSource
         public void Deadline_ParseInvalidHeader_IgnoresHeader(string header)
         {
             // Arrange
@@ -392,6 +393,27 @@ namespace Grpc.AspNetCore.Server.Tests
 
             var write = testSink.Writes.Single(w => w.EventId.Name == "InvalidTimeoutIgnored");
             Assert.AreEqual($"Invalid grpc-timeout header value '{header}' has been ignored.", write.State.ToString());
+        }
+
+        [Test]
+        public void Deadline_TooLong_LoggedAndMaximumDeadlineUsed()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var testLogger = new TestLogger(string.Empty, testSink, true);
+
+            var httpContext = new DefaultHttpContext();
+            httpContext.Request.Headers[GrpcProtocolConstants.TimeoutHeader] = "9999999H";
+            var context = CreateServerCallContext(httpContext, testLogger);
+
+            // Act
+            context.Initialize(TestClock);
+
+            // Assert
+            Assert.AreEqual(TestClock.UtcNow.Add(TimeSpan.FromTicks(GrpcProtocolConstants.MaxDeadlineTicks)), context.Deadline);
+
+            var write = testSink.Writes.Single(w => w.EventId.Name == "DeadlineTimeoutTooLong");
+            Assert.AreEqual("Deadline timeout 416666.15:00:00 is above maximum allowed timeout of 99999999 seconds. Maximum timeout will be used.", write.State.ToString());
         }
 
         [Test]
@@ -424,7 +446,10 @@ namespace Grpc.AspNetCore.Server.Tests
             Assert.IsTrue(context.CancellationToken.IsCancellationRequested);
             Assert.IsTrue(httpContext.RequestAborted.IsCancellationRequested);
 
-            var write = testSink.Writes.Single(w => w.EventId.Name == "DeadlineExceeded");
+            var write = testSink.Writes.Single(w => w.EventId.Name == "DeadlineStarted");
+            Assert.AreEqual("Request deadline timeout of 00:00:01 started.", write.State.ToString());
+
+            write = testSink.Writes.Single(w => w.EventId.Name == "DeadlineExceeded");
             Assert.AreEqual("Request with timeout of 00:00:01 has exceeded its deadline.", write.State.ToString());
         }
 
@@ -477,6 +502,29 @@ namespace Grpc.AspNetCore.Server.Tests
         }
 
         [Test]
+        public void CancellationToken_WithDeadlineAndRequestAborted_AccessCancellationTokenBeforeAbort_DeadlineStatusNotSet()
+        {
+            // Arrange
+            var testSink = new TestSink();
+            var testLogger = new TestLogger(string.Empty, testSink, true);
+
+            var requestLifetimeFeature = new TestHttpRequestLifetimeFeature();
+            var httpContext = new DefaultHttpContext();
+            httpContext.Features.Set<IHttpRequestLifetimeFeature>(requestLifetimeFeature);
+            httpContext.Request.Headers[GrpcProtocolConstants.TimeoutHeader] = "1000S";
+            var context = CreateServerCallContext(httpContext, testLogger);
+            context.Initialize();
+
+            // Act
+            var ct = context.CancellationToken;
+            requestLifetimeFeature.Abort();
+
+            // Assert
+            Assert.AreNotEqual(StatusCode.DeadlineExceeded, context.Status.StatusCode);
+            Assert.IsTrue(ct.IsCancellationRequested);
+        }
+
+        [Test]
         public void AuthContext_NoClientCertificate_Unauthenticated()
         {
             // Arrange
@@ -521,19 +569,35 @@ namespace Grpc.AspNetCore.Server.Tests
             Assert.AreEqual("TestValue", httpContext.Items["TestKey"]);
         }
 
-        [TestCase(GrpcProtocolConstants.MessageAcceptEncodingHeader, false)]
-        [TestCase(GrpcProtocolConstants.MessageEncodingHeader, false)]
-        [TestCase(GrpcProtocolConstants.TimeoutHeader, false)]
+        [TestCase("grpc-accept-encoding", false)]
+        [TestCase("GRPC-ACCEPT-ENCODING", false)]
+        [TestCase("grpc-encoding", false)]
+        [TestCase("GRPC-ENCODING", false)]
+        [TestCase("grpc-timeout", false)]
+        [TestCase("GRPC-TIMEOUT", false)]
         [TestCase("content-type", false)]
+        [TestCase("CONTENT-TYPE", false)]
+        [TestCase("content-encoding", false)]
+        [TestCase("CONTENT-ENCODING", false)]
         [TestCase("te", false)]
+        [TestCase("TE", false)]
         [TestCase("host", false)]
+        [TestCase("HOST", false)]
         [TestCase("accept-encoding", false)]
+        [TestCase("ACCEPT-ENCODING", false)]
         [TestCase("user-agent", true)]
+        [TestCase("USER-AGENT", true)]
+        [TestCase("grpc-status-details-bin", true)]
+        [TestCase("GRPC-STATUS-DETAILS-BIN", true)]
         public void RequestHeaders_ManyHttpRequestHeaders_HeadersFiltered(string headerName, bool addedToRequestHeaders)
         {
             // Arrange
             var httpContext = new DefaultHttpContext();
-            httpContext.Request.Headers[headerName] = "value";
+
+            // A base64 valid value is required for -bin headers
+            var value = Convert.ToBase64String(Encoding.UTF8.GetBytes("Hello world"));
+            httpContext.Request.Headers[headerName] = value;
+
             var serverCallContext = CreateServerCallContext(httpContext);
 
             // Act
@@ -587,7 +651,7 @@ namespace Grpc.AspNetCore.Server.Tests
                 Assert.Fail($"{methodName} did not wait on lock taken by deadline cancellation.");
             }
 
-            Assert.IsFalse(serverCallContext.DeadlineManager!._callComplete);
+            Assert.IsFalse(serverCallContext.DeadlineManager!.IsCallComplete);
 
             // Wait for dispose to finish
             syncPoint.Continue();
@@ -595,7 +659,7 @@ namespace Grpc.AspNetCore.Server.Tests
 
             Assert.AreEqual(GrpcProtocolConstants.ResetStreamNoError, httpResetFeature.ErrorCode);
 
-            Assert.IsTrue(serverCallContext.DeadlineManager!._callComplete);
+            Assert.IsTrue(serverCallContext.DeadlineManager!.IsCallComplete);
         }
 
         [Test]
@@ -646,7 +710,7 @@ namespace Grpc.AspNetCore.Server.Tests
                 context.Initialize();
 
                 // Assert
-                Assert.AreEqual("/Package.Service/Method", Activity.Current.Tags.Single(t => t.Key == GrpcServerConstants.ActivityMethodTag).Value);
+                Assert.AreEqual("/Package.Service/Method", Activity.Current!.Tags.Single(t => t.Key == GrpcServerConstants.ActivityMethodTag).Value);
             }
         }
 
@@ -667,7 +731,7 @@ namespace Grpc.AspNetCore.Server.Tests
                 }
 
                 // Assert
-                Assert.AreEqual("/Package.Service/Method", Activity.Current.Tags.Single(t => t.Key == GrpcServerConstants.ActivityMethodTag).Value);
+                Assert.AreEqual("/Package.Service/Method", Activity.Current?.Tags.Single(t => t.Key == GrpcServerConstants.ActivityMethodTag).Value);
             }
         }
 
@@ -683,10 +747,10 @@ namespace Grpc.AspNetCore.Server.Tests
 
                 // Act
                 context.Initialize();
-                await context.EndCallAsync();
+                await context.EndCallAsync().DefaultTimeout();
 
                 // Assert
-                Assert.AreEqual("8", Activity.Current.Tags.Single(t => t.Key == GrpcServerConstants.ActivityStatusCodeTag).Value);
+                Assert.AreEqual("8", Activity.Current!.Tags.Single(t => t.Key == GrpcServerConstants.ActivityStatusCodeTag).Value);
             }
         }
 
@@ -705,7 +769,7 @@ namespace Grpc.AspNetCore.Server.Tests
                 await context.ProcessHandlerErrorAsync(new Exception(), "MethodName");
 
                 // Assert
-                Assert.AreEqual("2", Activity.Current.Tags.Single(t => t.Key == GrpcServerConstants.ActivityStatusCodeTag).Value);
+                Assert.AreEqual("2", Activity.Current!.Tags.Single(t => t.Key == GrpcServerConstants.ActivityStatusCodeTag).Value);
             }
         }
 
@@ -786,16 +850,6 @@ namespace Grpc.AspNetCore.Server.Tests
 
                 _cts.Cancel();
             }
-        }
-
-        private class TestSystemClock : ISystemClock
-        {
-            public TestSystemClock(DateTime utcNow)
-            {
-                UtcNow = utcNow;
-            }
-
-            public DateTime UtcNow { get; }
         }
     }
 }

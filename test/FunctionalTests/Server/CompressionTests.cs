@@ -175,15 +175,15 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
 
             ReadResult readResult;
 
-            readResult = await pipeReader.ReadAsync();
+            readResult = await pipeReader.ReadAsync().AsTask().DefaultTimeout();
             Assert.AreEqual(1, readResult.Buffer.FirstSpan[0]); // Message is compressed
             var greeting1 = await MessageHelpers.AssertReadStreamMessageAsync<HelloReply>(pipeReader, "gzip").DefaultTimeout();
-            Assert.AreEqual($"Hello 1", greeting1.Message);
+            Assert.AreEqual($"Hello 1", greeting1!.Message);
 
-            readResult = await pipeReader.ReadAsync();
+            readResult = await pipeReader.ReadAsync().AsTask().DefaultTimeout();
             Assert.AreEqual(0, readResult.Buffer.FirstSpan[0]); // Message is uncompressed
             var greeting2 = await MessageHelpers.AssertReadStreamMessageAsync<HelloReply>(pipeReader, "gzip").DefaultTimeout();
-            Assert.AreEqual($"Hello 2", greeting2.Message);
+            Assert.AreEqual($"Hello 2", greeting2!.Message);
 
             var finishedTask = MessageHelpers.AssertReadStreamMessageAsync<HelloReply>(pipeReader);
             Assert.IsNull(await finishedTask.DefaultTimeout());
@@ -210,7 +210,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
 
             // Assert
             Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
-            Assert.AreEqual("identity", response.Headers.GetValues(GrpcProtocolConstants.MessageEncodingHeader).Single());
+            Assert.IsFalse(response.Headers.Contains(GrpcProtocolConstants.MessageEncodingHeader));
 
             var responseMessage = MessageHelpers.AssertReadMessage<HelloReply>(await response.Content.ReadAsByteArrayAsync().DefaultTimeout());
             Assert.AreEqual("Hello World", responseMessage.Message);
@@ -223,13 +223,6 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             // Arrange
             SetExpectedErrorsFilter(writeContext =>
             {
-                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
-                    writeContext.EventId.Name == "RpcConnectionError" &&
-                    writeContext.State.ToString() == "Error status code 'Internal' raised.")
-                {
-                    return true;
-                }
-
                 if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
                     writeContext.EventId.Name == "ErrorReadingMessage" &&
                     writeContext.State.ToString() == "Error reading message.")
@@ -259,6 +252,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
 
             response.AssertTrailerStatus(StatusCode.Internal, "Request sent 'identity' grpc-encoding value with compressed message.");
+
+            AssertHasLogRpcConnectionError(StatusCode.Internal, "Request sent 'identity' grpc-encoding value with compressed message.");
         }
 
         [Test]
@@ -291,14 +286,6 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             // Arrange
             SetExpectedErrorsFilter(writeContext =>
             {
-                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
-                    writeContext.EventId.Name == "RpcConnectionError" &&
-                    writeContext.State.ToString() == "Error status code 'Unimplemented' raised." &&
-                    GetRpcExceptionDetail(writeContext.Exception) == "Unsupported grpc-encoding value 'DOES_NOT_EXIST'. Supported encodings: identity, gzip")
-                {
-                    return true;
-                }
-
                 if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
                     writeContext.EventId.Name == "ErrorReadingMessage" &&
                     writeContext.State.ToString() == "Error reading message." &&
@@ -337,6 +324,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             Assert.AreEqual("identity,gzip", response.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
 
             response.AssertTrailerStatus(StatusCode.Unimplemented, "Unsupported grpc-encoding value 'DOES_NOT_EXIST'. Supported encodings: identity, gzip");
+
+            AssertHasLogRpcConnectionError(StatusCode.Unimplemented, "Unsupported grpc-encoding value 'DOES_NOT_EXIST'. Supported encodings: identity, gzip");
         }
 
         private class DoesNotExistCompressionProvider : ICompressionProvider
@@ -388,14 +377,6 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             SetExpectedErrorsFilter(writeContext =>
             {
                 if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
-                    writeContext.EventId.Name == "RpcConnectionError" &&
-                    writeContext.State.ToString() == "Error status code 'Internal' raised." &&
-                    GetRpcExceptionDetail(writeContext.Exception) == "Request did not include grpc-encoding value with compressed message.")
-                {
-                    return true;
-                }
-
-                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
                     writeContext.EventId.Name == "ErrorReadingMessage" &&
                     writeContext.State.ToString() == "Error reading message." &&
                     GetRpcExceptionDetail(writeContext.Exception) == "Request did not include grpc-encoding value with compressed message.")
@@ -424,6 +405,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             // Assert
             Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
             response.AssertTrailerStatus(StatusCode.Internal, "Request did not include grpc-encoding value with compressed message.");
+
+            AssertHasLogRpcConnectionError(StatusCode.Internal, "Request did not include grpc-encoding value with compressed message.");
         }
 
         [Test]
@@ -507,7 +490,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
 
             // Assert
             Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
-            Assert.AreEqual("identity", response.Headers.GetValues(GrpcProtocolConstants.MessageEncodingHeader).Single());
+            Assert.IsFalse(response.Headers.Contains(GrpcProtocolConstants.MessageEncodingHeader));
 
             var responseMessage = MessageHelpers.AssertReadMessage<HelloReply>(await response.Content.ReadAsByteArrayAsync().DefaultTimeout());
             Assert.AreEqual("Hello World", responseMessage.Message);

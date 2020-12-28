@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netcoreapp3.0</TargetFramework>
+    <TargetFrameworks>netcoreapp3.1;net5.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
@@ -35,7 +35,9 @@
     <ProjectReference Include="..\..\src\Grpc.AspNetCore.HealthChecks\Grpc.AspNetCore.HealthChecks.csproj" />
     <ProjectReference Include="..\..\src\Grpc.AspNetCore.Server.Reflection\Grpc.AspNetCore.Server.Reflection.csproj" />
 
-    <PackageReference Include="Microsoft.Extensions.Logging.Testing" Version="$(MicrosoftExtensionsPackageVersion)" />
+    <PackageReference Include="System.IO.Pipelines" Version="$(SystemIOPipelinesPackageVersion)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Testing" Version="$(MicrosoftExtensionsLoggingTestingPackageVersion)" />
+    <PackageReference Include="System.IO.Pipelines" Version="$(SystemIOPipelinesPackageVersion)" />
   </ItemGroup>
 
   <ItemGroup>

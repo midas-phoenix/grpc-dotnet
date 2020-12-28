@@ -20,9 +20,10 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Web;
-using Microsoft.AspNetCore.Blazor.Hosting;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Weather;
 
 namespace Client
 {
@@ -31,25 +32,28 @@ namespace Client
         public static async Task Main(string[] args)
         {
             var builder = WebAssemblyHostBuilder.CreateDefault(args);
-            builder.RootComponents.Add<App>("app");
-
-            // Blazor WA currently has an issue related to server streaming. No messages are returned from the server until the call is complete.
-            // Setting WasmHttpMessageHandler.StreamingEnabled to true (reflection required) allows server streaming to work - https://github.com/mono/mono/issues/18718
-            var wasmHttpMessageHandlerType = System.Reflection.Assembly.Load("WebAssembly.Net.Http").GetType("WebAssembly.Net.Http.HttpClient.WasmHttpMessageHandler");
-            var streamingProperty = wasmHttpMessageHandlerType.GetProperty("StreamingEnabled", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            streamingProperty.SetValue(null, true, null);
+            builder.RootComponents.Add<App>("#app");
 
             builder.Services.AddSingleton(services =>
             {
-                // Create a gRPC-Web channel pointing to the backend server.
+                // Get the service address from appsettings.json
+                var config = services.GetRequiredService<IConfiguration>();
+                var backendUrl = config["BackendUrl"];
+
+                // If no address is set then fallback to the current webpage URL
+                if (string.IsNullOrEmpty(backendUrl))
+                {
+                    var navigationManager = services.GetRequiredService<NavigationManager>();
+                    backendUrl = navigationManager.BaseUri;
+                }
+
+                // Create a channel with a GrpcWebHandler that is addressed to the backend server.
                 //
                 // GrpcWebText is used because server streaming requires it. If server streaming is not used in your app
                 // then GrpcWeb is recommended because it produces smaller messages.
-                var httpClient = new HttpClient(new GrpcWebHandler(GrpcWebMode.GrpcWebText, new HttpClientHandler()));
+                var httpHandler = new GrpcWebHandler(GrpcWebMode.GrpcWebText, new HttpClientHandler());
 
-                var channel = GrpcChannel.ForAddress("https://localhost:5001", new GrpcChannelOptions { HttpClient = httpClient });
-
-                return channel;
+                return GrpcChannel.ForAddress(backendUrl, new GrpcChannelOptions { HttpHandler = httpHandler });
             });
 
             await builder.Build().RunAsync();

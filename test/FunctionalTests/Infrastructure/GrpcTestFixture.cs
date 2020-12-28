@@ -50,17 +50,25 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
 
             DynamicGrpc = _server.Host!.Services.GetRequiredService<DynamicGrpcServiceRegistry>();
 
+#if !NET5_0
             AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+#endif
 
-            Client = CreateClient();
+            (Client, Handler) = CreateHttpCore();
         }
 
         public ILoggerFactory LoggerFactory { get; }
         public DynamicGrpcServiceRegistry DynamicGrpc { get; }
 
+        public HttpMessageHandler Handler { get; }
         public HttpClient Client { get; }
 
         public HttpClient CreateClient(TestServerEndpointName? endpointName = null, DelegatingHandler? messageHandler = null)
+        {
+            return CreateHttpCore(endpointName, messageHandler).client;
+        }
+
+        private (HttpClient client, HttpMessageHandler handler) CreateHttpCore(TestServerEndpointName? endpointName = null, DelegatingHandler? messageHandler = null)
         {
             endpointName ??= TestServerEndpointName.Http2;
 
@@ -68,33 +76,43 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
             httpClientHandler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
 
             HttpClient client;
+            HttpMessageHandler handler;
             if (messageHandler != null)
             {
                 messageHandler.InnerHandler = httpClientHandler;
+                handler = messageHandler;
                 client = new HttpClient(messageHandler);
             }
             else
             {
+                handler = httpClientHandler;
                 client = new HttpClient(httpClientHandler);
             }
 
+            if (endpointName == TestServerEndpointName.Http2)
+            {
+                client.DefaultRequestVersion = new Version(2, 0);
+#if NET5_0
+                client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher;
+#endif
+            }
+            client.BaseAddress = new Uri(_server.GetUrl(endpointName.Value));
+
+            return (client, handler);
+        }
+
+        public Uri GetUrl(TestServerEndpointName? endpointName = null)
+        {
             switch (endpointName)
             {
                 case TestServerEndpointName.Http1:
-                    client.BaseAddress = new Uri(_server.GetUrl(endpointName.Value));
-                    break;
                 case TestServerEndpointName.Http2:
-                    client.DefaultRequestVersion = new Version(2, 0);
-                    client.BaseAddress = new Uri(_server.GetUrl(endpointName.Value));
-                    break;
                 case TestServerEndpointName.Http1WithTls:
-                    client.BaseAddress = new Uri(_server.GetUrl(endpointName.Value));
-                    break;
+                case TestServerEndpointName.Http2WithTls:
+                    return new Uri(_server.GetUrl(endpointName.Value));
                 default:
                     throw new ArgumentException("Unexpected value: " + endpointName, nameof(endpointName));
             }
-
-            return client;
         }
 
         internal event Action<LogRecord> ServerLogged

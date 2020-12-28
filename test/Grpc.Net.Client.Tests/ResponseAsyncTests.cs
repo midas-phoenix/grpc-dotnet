@@ -90,8 +90,7 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
             Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
 
-            var header = responseHeaders.Single(h => h.Key == "custom");
-            Assert.AreEqual("value!", header.Value);
+            Assert.AreEqual("value!", responseHeaders.GetValue("custom"));
         }
 
         [Test]
@@ -117,8 +116,7 @@ namespace Grpc.Net.Client.Tests
             await ExceptionAssert.ThrowsAsync<TaskCanceledException>(() => call.ResponseAsync).DefaultTimeout();
             Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
 
-            var header = responseHeaders.Single(h => h.Key == "custom");
-            Assert.AreEqual("value!", header.Value);
+            Assert.AreEqual("value!", responseHeaders.GetValue("custom"));
         }
 
         [Test]
@@ -137,7 +135,29 @@ namespace Grpc.Net.Client.Tests
 
             // Assert
             Assert.AreEqual(StatusCode.Internal, ex.StatusCode);
-            Assert.AreEqual("Error starting gRPC call: An error!", ex.Status.Detail);
+            Assert.AreEqual("Error starting gRPC call. Exception: An error!", ex.Status.Detail);
+            Assert.AreEqual("An error!", ex.Status.DebugException.Message);
+            Assert.AreEqual(StatusCode.Internal, call.GetStatus().StatusCode);
+        }
+
+        [Test]
+        public async Task AsyncUnaryCall_ErrorSendingRequest_ThrowsErrorWithInnerExceptionDetail()
+        {
+            // Arrange
+            var httpClient = ClientTestHelpers.CreateTestClient(request =>
+            {
+                return Task.FromException<HttpResponseMessage>(new Exception("An error!", new Exception("Nested error!")));
+            });
+            var invoker = HttpClientCallInvokerFactory.Create(httpClient);
+
+            // Act
+            var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
+
+            // Assert
+            Assert.AreEqual(StatusCode.Internal, ex.StatusCode);
+            Assert.AreEqual("Error starting gRPC call. Exception: An error! Exception: Nested error!", ex.Status.Detail);
+            Assert.AreEqual("Nested error!", ex.Status.DebugException.InnerException!.Message);
             Assert.AreEqual(StatusCode.Internal, call.GetStatus().StatusCode);
         }
 

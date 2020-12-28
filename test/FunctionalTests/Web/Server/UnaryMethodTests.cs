@@ -21,6 +21,7 @@ using System.IO.Pipelines;
 using System.Linq;
 using System.Threading.Tasks;
 using Grpc.AspNetCore.FunctionalTests.Infrastructure;
+using Grpc.Core;
 using Grpc.Gateway.Testing;
 using Grpc.Net.Client.Web;
 using Grpc.Tests.Shared;
@@ -61,10 +62,10 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Server
             // Assert
             response.AssertIsSuccessfulGrpcRequest();
 
-            var s = await response.Content.ReadAsStreamAsync();
+            var s = await response.Content.ReadAsStreamAsync().DefaultTimeout();
             var reader = PipeReader.Create(s);
 
-            var message = await MessageHelpers.AssertReadStreamMessageAsync<EchoResponse>(reader);
+            var message = await MessageHelpers.AssertReadStreamMessageAsync<EchoResponse>(reader).DefaultTimeout();
             Assert.AreEqual("test", message!.Message);
 
             response.AssertTrailerStatus();
@@ -73,18 +74,6 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Server
         [Test]
         public async Task SendValidRequest_ServerAbort_AbortResponse()
         {
-            SetExpectedErrorsFilter(writeContext =>
-            {
-                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName &&
-                    writeContext.EventId.Name == "RpcConnectionError" &&
-                    writeContext.State.ToString() == "Error status code 'Aborted' raised.")
-                {
-                    return true;
-                }
-
-                return false;
-            });
-
             // Arrange
             var requestMessage = new EchoRequest
             {
@@ -95,22 +84,25 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Server
             MessageHelpers.WriteMessage(ms, requestMessage);
 
             // Act
-            var response = await Fixture.Client.PostAsync(
+            var grpcWebClient = CreateGrpcWebClient();
+            var response = await grpcWebClient.PostAsync(
                 "grpc.gateway.testing.EchoService/EchoAbort",
                 new GrpcStreamContent(ms)).DefaultTimeout();
 
             // Assert
             response.AssertIsSuccessfulGrpcRequest();
 
-            var s = await response.Content.ReadAsStreamAsync();
+            var s = await response.Content.ReadAsStreamAsync().DefaultTimeout();
             var reader = PipeReader.Create(s);
 
-            var readResult = await reader.ReadAsync();
+            var readResult = await reader.ReadAsync().AsTask().DefaultTimeout();
             Assert.AreEqual(0, readResult.Buffer.Length);
             Assert.IsTrue(readResult.IsCompleted);
 
             Assert.AreEqual("10", response.Headers.GetValues("grpc-status").Single());
             Assert.AreEqual("Aborted from server side.", response.Headers.GetValues("grpc-message").Single());
+
+            AssertHasLogRpcConnectionError(StatusCode.Aborted, "Aborted from server side.");
         }
     }
 }

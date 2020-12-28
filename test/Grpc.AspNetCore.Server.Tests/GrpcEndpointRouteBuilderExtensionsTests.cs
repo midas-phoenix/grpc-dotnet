@@ -110,13 +110,13 @@ namespace Grpc.AspNetCore.Server.Tests
 
             var routeEndpoint1 = (RouteEndpoint)endpoints[0];
             Assert.AreEqual("/greet.Greeter/SayHello", routeEndpoint1.RoutePattern.RawText);
-            Assert.AreEqual("POST", routeEndpoint1.Metadata.GetMetadata<IHttpMethodMetadata>().HttpMethods.Single());
-            Assert.AreEqual("/greet.Greeter/SayHello", routeEndpoint1.Metadata.GetMetadata<GrpcMethodMetadata>().Method.FullName);
+            Assert.AreEqual("POST", routeEndpoint1.Metadata.GetMetadata<IHttpMethodMetadata>()?.HttpMethods.Single());
+            Assert.AreEqual("/greet.Greeter/SayHello", routeEndpoint1.Metadata.GetMetadata<GrpcMethodMetadata>()?.Method.FullName);
 
             var routeEndpoint2 = (RouteEndpoint)endpoints[1];
             Assert.AreEqual("/greet.Greeter/SayHellos", routeEndpoint2.RoutePattern.RawText);
-            Assert.AreEqual("POST", routeEndpoint2.Metadata.GetMetadata<IHttpMethodMetadata>().HttpMethods.Single());
-            Assert.AreEqual("/greet.Greeter/SayHellos", routeEndpoint2.Metadata.GetMetadata<GrpcMethodMetadata>().Method.FullName);
+            Assert.AreEqual("POST", routeEndpoint2.Metadata.GetMetadata<IHttpMethodMetadata>()?.HttpMethods.Single());
+            Assert.AreEqual("/greet.Greeter/SayHellos", routeEndpoint2.Metadata.GetMetadata<GrpcMethodMetadata>()?.Method.FullName);
         }
 
         [Test]
@@ -202,9 +202,8 @@ namespace Grpc.AspNetCore.Server.Tests
             // Assert
             var endpoints = routeBuilder.DataSources
                 .SelectMany(ds => ds.Endpoints)
-                .Where(e => e.Metadata.GetMetadata<GrpcMethodMetadata>() != null)
                 .ToList();
-            Assert.AreEqual(2, endpoints.Count);
+            Assert.AreEqual(4, endpoints.Count);
 
             var routeEndpoint1 = (RouteEndpoint)endpoints[0];
             Assert.AreEqual("/greet.Greeter/SayHello", routeEndpoint1.RoutePattern.RawText);
@@ -213,6 +212,14 @@ namespace Grpc.AspNetCore.Server.Tests
             var routeEndpoint2 = (RouteEndpoint)endpoints[1];
             Assert.AreEqual("/greet.Greeter/SayHellos", routeEndpoint2.RoutePattern.RawText);
             Assert.NotNull(routeEndpoint2.Metadata.GetMetadata<CustomMetadata>());
+
+            var routeEndpoint3 = (RouteEndpoint)endpoints[2];
+            Assert.AreEqual("{unimplementedService}/{unimplementedMethod}", routeEndpoint3.RoutePattern.RawText);
+            Assert.NotNull(routeEndpoint3.Metadata.GetMetadata<CustomMetadata>());
+
+            var routeEndpoint4 = (RouteEndpoint)endpoints[3];
+            Assert.AreEqual("greet.Greeter/{unimplementedMethod}", routeEndpoint4.RoutePattern.RawText);
+            Assert.NotNull(routeEndpoint4.Metadata.GetMetadata<CustomMetadata>());
         }
 
         [Test]
@@ -235,11 +242,11 @@ namespace Grpc.AspNetCore.Server.Tests
 
             var routeEndpoint1 = (RouteEndpoint)endpoints[0];
             Assert.AreEqual("/greet.Greeter/SayHello", routeEndpoint1.RoutePattern.RawText);
-            Assert.AreEqual("Method", routeEndpoint1.Metadata.GetMetadata<CustomAttribute>().Value);
+            Assert.AreEqual("Method", routeEndpoint1.Metadata.GetMetadata<CustomAttribute>()?.Value);
 
             var routeEndpoint2 = (RouteEndpoint)endpoints[1];
             Assert.AreEqual("/greet.Greeter/SayHellos", routeEndpoint2.RoutePattern.RawText);
-            Assert.AreEqual("Class", routeEndpoint2.Metadata.GetMetadata<CustomAttribute>().Value);
+            Assert.AreEqual("Class", routeEndpoint2.Metadata.GetMetadata<CustomAttribute>()?.Value);
         }
 
         [Test]
@@ -271,7 +278,7 @@ namespace Grpc.AspNetCore.Server.Tests
             Assert.AreEqual("Method", orderedMetadata[1].Value);
             Assert.AreEqual("Builder", orderedMetadata[2].Value);
 
-            Assert.AreEqual("Builder", routeEndpoint1.Metadata.GetMetadata<CustomAttribute>().Value);
+            Assert.AreEqual("Builder", routeEndpoint1.Metadata.GetMetadata<CustomAttribute>()?.Value);
         }
 
         [Test]
@@ -294,6 +301,71 @@ namespace Grpc.AspNetCore.Server.Tests
             // Assert
             Assert.AreEqual("Error binding gRPC service 'GreeterWithAttributeService'.", ex.Message);
             Assert.AreEqual("The configured response compression algorithm 'DOES_NOT_EXIST' does not have a matching compression provider.", ex.InnerException!.InnerException!.Message);
+        }
+
+        [Test]
+        public void MapGrpcService_IgnoreUnknownServicesDefault_RegisterUnknownHandler()
+        {
+            // Arrange
+            var services = ServicesHelpers.CreateServices();
+
+            var routeBuilder = CreateTestEndpointRouteBuilder(services.BuildServiceProvider(validateScopes: true));
+
+            // Act
+            routeBuilder.MapGrpcService<GreeterServiceWithMetadataAttributes>();
+
+            // Assert
+            var endpoints = routeBuilder.DataSources
+                .SelectMany(ds => ds.Endpoints)
+                .ToList();
+
+            Assert.IsNotNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented service"));
+            Assert.IsNotNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented method for greet.Greeter"));
+        }
+
+        [Test]
+        public void MapGrpcService_IgnoreUnknownServicesGlobalTrue_DontRegisterUnknownHandler()
+        {
+            // Arrange
+            var services = ServicesHelpers.CreateServices(o => o.IgnoreUnknownServices = true);
+
+            var routeBuilder = CreateTestEndpointRouteBuilder(services.BuildServiceProvider(validateScopes: true));
+
+            // Act
+            routeBuilder.MapGrpcService<GreeterServiceWithMetadataAttributes>();
+
+            // Assert
+            var endpoints = routeBuilder.DataSources
+                .SelectMany(ds => ds.Endpoints)
+                .ToList();
+
+            Assert.IsNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented service"));
+            Assert.IsNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented method for greet.Greeter"));
+
+            Assert.AreEqual(0, endpoints.Count(e => e.Metadata.GetMetadata<GrpcMethodMetadata>() == null));
+        }
+
+        [Test]
+        public void MapGrpcService_IgnoreUnknownServicesServiceTrue_DontRegisterUnknownHandler()
+        {
+            // Arrange
+            var services = ServicesHelpers.CreateServices(configureGrpcService: o =>
+            {
+                o.AddServiceOptions<GreeterServiceWithMetadataAttributes>(o => o.IgnoreUnknownServices = true);
+            });
+
+            var routeBuilder = CreateTestEndpointRouteBuilder(services.BuildServiceProvider(validateScopes: true));
+
+            // Act
+            routeBuilder.MapGrpcService<GreeterServiceWithMetadataAttributes>();
+
+            // Assert
+            var endpoints = routeBuilder.DataSources
+                .SelectMany(ds => ds.Endpoints)
+                .ToList();
+
+            Assert.IsNotNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented service"));
+            Assert.IsNull(endpoints.SingleOrDefault(e => e.DisplayName == "gRPC - Unimplemented method for GreeterServiceWithMetadataAttributes"));
         }
 
         public IEndpointRouteBuilder CreateTestEndpointRouteBuilder(IServiceProvider serviceProvider)

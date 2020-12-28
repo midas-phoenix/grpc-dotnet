@@ -34,16 +34,13 @@ namespace Grpc.Net.Client.Internal
 
         private readonly GrpcCall<TRequest, TResponse> _call;
         private readonly ILogger _logger;
-        private readonly string _grpcEncoding;
         private readonly object _writeLock;
         private Task? _writeTask;
 
         public TaskCompletionSource<Stream> WriteStreamTcs { get; }
         public TaskCompletionSource<bool> CompleteTcs { get; }
 
-        public HttpContentClientStreamWriter(
-            GrpcCall<TRequest, TResponse> call,
-            HttpRequestMessage message)
+        public HttpContentClientStreamWriter(GrpcCall<TRequest, TResponse> call)
         {
             _call = call;
             _logger = call.Channel.LoggerFactory.CreateLogger(LoggerName);
@@ -52,7 +49,6 @@ namespace Grpc.Net.Client.Internal
             CompleteTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             _writeLock = new object();
             WriteOptions = _call.Options.WriteOptions;
-            _grpcEncoding = GrpcProtocolHelpers.GetRequestEncoding(message.Headers);
         }
 
         public WriteOptions WriteOptions { get; set; }
@@ -129,7 +125,7 @@ namespace Grpc.Net.Client.Internal
                         return CreateErrorTask("Can't write the message because the previous write is in progress.");
                     }
 
-                    // Save write task to track whether it is complete
+                    // Save write task to track whether it is complete. Must be set inside lock.
                     _writeTask = WriteAsyncCore(message);
                 }
             }
@@ -163,7 +159,10 @@ namespace Grpc.Net.Client.Internal
                     callOptions = callOptions.WithWriteOptions(WriteOptions);
                 }
 
-                await _call.WriteMessageAsync(writeStream, message, _grpcEncoding, callOptions);
+                await _call.WriteMessageAsync(writeStream, message, callOptions).ConfigureAwait(false);
+
+                // Flush stream to ensure messages are sent immediately
+                await writeStream.FlushAsync(callOptions.CancellationToken).ConfigureAwait(false);
 
                 GrpcEventSource.Log.MessageSent();
             }

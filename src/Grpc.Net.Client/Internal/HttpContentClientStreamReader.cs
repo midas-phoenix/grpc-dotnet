@@ -58,9 +58,9 @@ namespace Grpc.Net.Client.Internal
 
         // IAsyncStreamReader<T> should declare Current as nullable
         // Suppress warning when overriding interface definition
-#pragma warning disable CS8613 // Nullability of reference types in return type doesn't match implicitly implemented member.
+#pragma warning disable CS8613, CS8766 // Nullability of reference types in return type doesn't match implicitly implemented member.
         public TResponse? Current { get; private set; }
-#pragma warning restore CS8613 // Nullability of reference types in return type doesn't match implicitly implemented member.
+#pragma warning restore CS8613, CS8766 // Nullability of reference types in return type doesn't match implicitly implemented member.
 
         public void Dispose()
         {
@@ -119,21 +119,16 @@ namespace Grpc.Net.Client.Internal
 
         private async Task<bool> MoveNextCore(CancellationToken cancellationToken)
         {
-            CancellationTokenSource? cts = null;
+            CancellationTokenRegistration? ctsRegistration = null;
             try
             {
-                // Linking tokens is expensive. Only create a linked token if the token passed in requires it
                 if (cancellationToken.CanBeCanceled)
                 {
-                    cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _call.CancellationToken);
-                    cancellationToken = cts.Token;
-                }
-                else
-                {
-                    cancellationToken = _call.CancellationToken;
+                    // The cancellation token will cancel the call CTS.
+                    ctsRegistration = cancellationToken.Register(_call.CancelCallFromCancellationToken);
                 }
 
-                cancellationToken.ThrowIfCancellationRequested();
+                _call.CancellationToken.ThrowIfCancellationRequested();
 
                 if (_httpResponse == null)
                 {
@@ -167,12 +162,13 @@ namespace Grpc.Net.Client.Internal
                     _responseStream,
                     _grpcEncoding,
                     singleMessage: false,
-                    cancellationToken).ConfigureAwait(false);
+                    _call.CancellationToken).ConfigureAwait(false);
                 if (Current == null)
                 {
-                    // No more content in response so mark as finished
+                    // No more content in response so report status to call.
+                    // The call will handle finishing the response.
                     var status = GrpcProtocolHelpers.GetResponseStatus(_httpResponse);
-                    _call.FinishResponse(status);
+                    _call.ResponseStreamEnded(status);
                     if (status.StatusCode != StatusCode.OK)
                     {
                         throw _call.CreateFailureStatusException(status);
@@ -199,9 +195,14 @@ namespace Grpc.Net.Client.Internal
 
                 throw _call.CreateCanceledStatusException();
             }
+            catch (Exception ex) when (_call.ResolveException("Error reading next message.", ex, out _, out var resolvedException))
+            {
+                // Throw RpcException from MoveNext. Consistent with Grpc.Core.
+                throw resolvedException;
+            }
             finally
             {
-                cts?.Dispose();
+                ctsRegistration?.Dispose();
             }
         }
 

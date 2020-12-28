@@ -20,6 +20,7 @@ using System;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Greet;
 using Grpc.Core;
 using Grpc.Tests.Shared;
 using NUnit.Framework;
@@ -40,16 +41,6 @@ namespace Grpc.Net.Client.Tests
 
             // Assert
             Assert.IsTrue(channel.IsSecure);
-        }
-
-        [Test]
-        public void Build_NoHttpClient_InternalHttpClientHasInfiniteTimeout()
-        {
-            // Arrange & Act
-            var channel = GrpcChannel.ForAddress("https://localhost");
-
-            // Assert
-            Assert.AreEqual(Timeout.InfiniteTimeSpan, channel.HttpClient.Timeout);
         }
 
         [Test]
@@ -108,6 +99,56 @@ namespace Grpc.Net.Client.Tests
         }
 
         [Test]
+        public void Build_HttpClientAndHttpHandler_ThrowsError()
+        {
+            // Arrange & Act
+            var ex = Assert.Throws<ArgumentException>(() => GrpcChannel.ForAddress("https://localhost", new GrpcChannelOptions
+            {
+                HttpClient = new HttpClient(),
+                HttpHandler = new HttpClientHandler()
+            }));
+
+            // Assert
+            Assert.AreEqual("HttpClient and HttpHandler have been configured. Only one HTTP caller can be specified.", ex.Message);
+        }
+
+        [Test]
+        public async Task Build_HttpClient_UsedForRequestsAsync()
+        {
+            // Arrange
+            var handler = new ExceptionHttpMessageHandler("HttpClient");
+            var channel = GrpcChannel.ForAddress("https://localhost", new GrpcChannelOptions
+            {
+                HttpClient = new HttpClient(handler)
+            });
+            var client = new Greeter.GreeterClient(channel);
+
+            // Act
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () => await client.SayHelloAsync(new HelloRequest()));
+
+            // Assert
+            Assert.AreEqual("HttpClient", ex.Status.DebugException.Message);
+        }
+
+        [Test]
+        public async Task Build_HttpHandler_UsedForRequestsAsync()
+        {
+            // Arrange
+            var handler = new ExceptionHttpMessageHandler("HttpHandler");
+            var channel = GrpcChannel.ForAddress("https://localhost", new GrpcChannelOptions
+            {
+                HttpHandler = handler
+            });
+            var client = new Greeter.GreeterClient(channel);
+
+            // Act
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(async () => await client.SayHelloAsync(new HelloRequest()));
+
+            // Assert
+            Assert.AreEqual("HttpHandler", ex.Status.DebugException.Message);
+        }
+
+        [Test]
         public void Dispose_NotCalled_NotDisposed()
         {
             // Arrange
@@ -130,7 +171,7 @@ namespace Grpc.Net.Client.Tests
 
             // Assert
             Assert.IsTrue(channel.Disposed);
-            Assert.Throws<ObjectDisposedException>(() => channel.HttpClient.CancelPendingRequests());
+            Assert.Throws<ObjectDisposedException>(() => channel.HttpInvoker.SendAsync(new HttpRequestMessage(), CancellationToken.None));
         }
 
         [Test]
@@ -174,21 +215,6 @@ namespace Grpc.Net.Client.Tests
             await ExceptionAssert.ThrowsAsync<ObjectDisposedException>(() => client.SayHelloAsync(new Greet.HelloRequest()).ResponseAsync);
         }
 
-        public class TestHttpMessageHandler : HttpMessageHandler
-        {
-            public bool Disposed { get; private set; }
-
-            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-            {
-                throw new NotImplementedException();
-            }
-
-            protected override void Dispose(bool disposing)
-            {
-                Disposed = true;
-            }
-        }
-
         [Test]
         public void Dispose_CalledWhenHttpClientSpecified_HttpClientNotDisposed()
         {
@@ -226,6 +252,86 @@ namespace Grpc.Net.Client.Tests
             // Assert
             Assert.IsTrue(channel.Disposed);
             Assert.IsTrue(handler.Disposed);
+        }
+
+        [Test]
+        public void Dispose_CalledWhenHttpMessageHandlerSpecifiedAndHttpClientDisposedTrue_HttpClientDisposed()
+        {
+            // Arrange
+            var handler = new TestHttpMessageHandler();
+            var channel = GrpcChannel.ForAddress("https://localhost", new GrpcChannelOptions
+            {
+                HttpHandler = handler,
+                DisposeHttpClient = true
+            });
+
+            // Act
+            channel.Dispose();
+
+            // Assert
+            Assert.IsTrue(channel.Disposed);
+            Assert.IsTrue(handler.Disposed);
+        }
+
+        [Test]
+        public async Task Dispose_CalledWhileActiveCalls_ActiveCallsDisposed()
+        {
+            // Arrange
+            var handler = new TestHttpMessageHandler();
+            var channel = GrpcChannel.ForAddress("https://localhost", new GrpcChannelOptions
+            {
+                HttpHandler = handler
+            });
+
+            var client = new Greeter.GreeterClient(channel);
+            var call = client.SayHelloAsync(new HelloRequest());
+
+            var exTask = ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync);
+            Assert.IsFalse(exTask.IsCompleted);
+            Assert.AreEqual(1, channel.ActiveCalls.Count);
+
+            // Act
+            channel.Dispose();
+
+            // Assert
+            var ex = await exTask.DefaultTimeout();
+            Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
+            Assert.AreEqual("gRPC call disposed.", ex.Status.Detail);
+
+            Assert.IsTrue(channel.Disposed);
+            Assert.AreEqual(0, channel.ActiveCalls.Count);
+        }
+
+        public class TestHttpMessageHandler : HttpMessageHandler
+        {
+            public bool Disposed { get; private set; }
+
+            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                var tcs = new TaskCompletionSource<HttpResponseMessage>();
+                cancellationToken.Register(s => ((TaskCompletionSource<HttpResponseMessage>)s!).SetException(new OperationCanceledException()), tcs);
+                return await tcs.Task;
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                Disposed = true;
+            }
+        }
+
+        public class ExceptionHttpMessageHandler : HttpMessageHandler
+        {
+            public string ExceptionMessage { get; }
+
+            public ExceptionHttpMessageHandler(string exceptionMessage)
+            {
+                ExceptionMessage = exceptionMessage;
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                return Task.FromException<HttpResponseMessage>(new InvalidOperationException(ExceptionMessage));
+            }
         }
     }
 }

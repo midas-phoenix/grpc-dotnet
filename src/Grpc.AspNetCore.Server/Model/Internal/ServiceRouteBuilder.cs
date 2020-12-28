@@ -79,7 +79,7 @@ namespace Grpc.AspNetCore.Server.Model.Internal
 
                     endpointConventionBuilders.Add(endpointBuilder);
 
-                    Log.AddedServiceMethod(_logger, method.Method.Name, method.Method.ServiceName, method.Method.Type, method.Pattern.RawText);
+                    Log.AddedServiceMethod(_logger, method.Method.Name, method.Method.ServiceName, method.Method.Type, method.Pattern.RawText ?? string.Empty);
                 }
             }
             else
@@ -91,7 +91,8 @@ namespace Grpc.AspNetCore.Server.Model.Internal
                 endpointRouteBuilder,
                 _serviceMethodsRegistry,
                 _serverCallHandlerFactory,
-                serviceMethodProviderContext.Methods);
+                serviceMethodProviderContext.Methods,
+                endpointConventionBuilders);
 
             _serviceMethodsRegistry.Methods.AddRange(serviceMethodProviderContext.Methods);
 
@@ -102,37 +103,44 @@ namespace Grpc.AspNetCore.Server.Model.Internal
             IEndpointRouteBuilder endpointRouteBuilder,
             ServiceMethodsRegistry serviceMethodsRegistry,
             ServerCallHandlerFactory<TService> serverCallHandlerFactory,
-            List<MethodModel> serviceMethods)
+            List<MethodModel> serviceMethods,
+            List<IEndpointConventionBuilder> endpointConventionBuilders)
         {
             // Return UNIMPLEMENTED status for missing service:
             // - /{service}/{method} + content-type header = grpc/application
-            if (serviceMethodsRegistry.Methods.Count == 0)
+            if (!serverCallHandlerFactory.IgnoreUnknownServices && serviceMethodsRegistry.Methods.Count == 0)
             {
                 // Only one unimplemented service endpoint is needed for the application
-                CreateUnimplementedEndpoint(endpointRouteBuilder, "{unimplementedService}/{unimplementedMethod}", "Unimplemented service", serverCallHandlerFactory.CreateUnimplementedService());
+                endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, "{unimplementedService}/{unimplementedMethod}", "Unimplemented service", serverCallHandlerFactory.CreateUnimplementedService()));
             }
 
             // Return UNIMPLEMENTED status for missing method:
             // - /Package.Service/{method} + content-type header = grpc/application
-            var serviceNames = serviceMethods.Select(m => m.Method.ServiceName).Distinct();
-
-            // Typically there should be one service name for a type
-            // In case the bind method sets up multiple services in one call we'll loop over them
-            foreach (var serviceName in serviceNames)
+            if (!serverCallHandlerFactory.IgnoreUnknownMethods)
             {
-                if (serviceMethodsRegistry.Methods.Any(m => string.Equals(m.Method.ServiceName, serviceName, StringComparison.Ordinal)))
-                {
-                    // Only one unimplemented method endpoint is need for the service
-                    continue;
-                }
+                var serviceNames = serviceMethods.Select(m => m.Method.ServiceName).Distinct();
 
-                CreateUnimplementedEndpoint(endpointRouteBuilder, serviceName + "/{unimplementedMethod}", $"Unimplemented method for {serviceName}", serverCallHandlerFactory.CreateUnimplementedMethod());
+                // Typically there should be one service name for a type
+                // In case the bind method sets up multiple services in one call we'll loop over them
+                foreach (var serviceName in serviceNames)
+                {
+                    if (serviceMethodsRegistry.Methods.Any(m => string.Equals(m.Method.ServiceName, serviceName, StringComparison.Ordinal)))
+                    {
+                        // Only one unimplemented method endpoint is need for the service
+                        continue;
+                    }
+
+                    endpointConventionBuilders.Add(CreateUnimplementedEndpoint(endpointRouteBuilder, serviceName + "/{unimplementedMethod}", $"Unimplemented method for {serviceName}", serverCallHandlerFactory.CreateUnimplementedMethod()));
+                }
             }
         }
 
-        private static void CreateUnimplementedEndpoint(IEndpointRouteBuilder endpointRouteBuilder, string pattern, string displayName, RequestDelegate requestDelegate)
+        private static IEndpointConventionBuilder CreateUnimplementedEndpoint(IEndpointRouteBuilder endpointRouteBuilder, string pattern, string displayName, RequestDelegate requestDelegate)
         {
+#pragma warning disable CS8625 // Cannot convert null literal to non-nullable reference type.
+            // https://github.com/dotnet/aspnetcore/issues/24042
             var routePattern = RoutePatternFactory.Parse(pattern, defaults: null, new { contentType = GrpcUnimplementedConstraint.Instance });
+#pragma warning restore CS8625 // Cannot convert null literal to non-nullable reference type.
             var endpointBuilder = endpointRouteBuilder.Map(routePattern, requestDelegate);
 
             endpointBuilder.Add(ep =>
@@ -141,17 +149,25 @@ namespace Grpc.AspNetCore.Server.Model.Internal
                 // Don't add POST metadata here. It will return 405 status for other HTTP methods which isn't
                 // what we want. That check is made in a constraint instead.
             });
+
+            return endpointBuilder;
         }
 
         private class GrpcUnimplementedConstraint : IRouteConstraint
         {
             public static readonly GrpcUnimplementedConstraint Instance = new GrpcUnimplementedConstraint();
 
-            public bool Match(HttpContext httpContext, IRouter route, string routeKey, RouteValueDictionary values, RouteDirection routeDirection)
+            public bool Match(HttpContext? httpContext, IRouter? route, string routeKey, RouteValueDictionary values, RouteDirection routeDirection)
             {
                 if (httpContext == null)
                 {
                     return false;
+                }
+
+                // Constraint needs to be valid when a CORS preflight request is received so that CORS middleware will run
+                if (GrpcProtocolHelpers.IsCorsPreflightRequest(httpContext))
+                {
+                    return true;
                 }
 
                 if (!HttpMethods.IsPost(httpContext.Request.Method))
@@ -172,13 +188,13 @@ namespace Grpc.AspNetCore.Server.Model.Internal
         private static class Log
         {
             private static readonly Action<ILogger, string, string, MethodType, string, Exception?> _addedServiceMethod =
-                LoggerMessage.Define<string, string, MethodType, string>(LogLevel.Debug, new EventId(1, "AddedServiceMethod"), "Added gRPC method '{MethodName}' to service '{ServiceName}'. Method type: '{MethodType}', route pattern: '{RoutePattern}'.");
+                LoggerMessage.Define<string, string, MethodType, string>(LogLevel.Trace, new EventId(1, "AddedServiceMethod"), "Added gRPC method '{MethodName}' to service '{ServiceName}'. Method type: '{MethodType}', route pattern: '{RoutePattern}'.");
 
             private static readonly Action<ILogger, Type, Exception?> _discoveringServiceMethods =
-                LoggerMessage.Define<Type>(LogLevel.Debug, new EventId(2, "DiscoveringServiceMethods"), "Discovering gRPC methods for {ServiceType}.");
+                LoggerMessage.Define<Type>(LogLevel.Trace, new EventId(2, "DiscoveringServiceMethods"), "Discovering gRPC methods for {ServiceType}.");
 
             private static readonly Action<ILogger, Type, Exception?> _noServiceMethodsDiscovered =
-                LoggerMessage.Define<Type>(LogLevel.Warning, new EventId(3, "NoServiceMethodsDiscovered"), "No gRPC methods discovered for {ServiceType}.");
+                LoggerMessage.Define<Type>(LogLevel.Debug, new EventId(3, "NoServiceMethodsDiscovered"), "No gRPC methods discovered for {ServiceType}.");
 
             public static void AddedServiceMethod(ILogger logger, string methodName, string serviceName, MethodType methodType, string routePattern)
             {

@@ -18,40 +18,61 @@
 
 using System;
 using System.IO;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Grpc.Testing;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
-#if CLIENT_CERTIFICATE_AUTHENTICATION
-using System.Security.Cryptography.X509Certificates;
+#if NET5_0 || NET6_0
 using Microsoft.AspNetCore.Authentication.Certificate;
 #endif
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Newtonsoft.Json;
 
 namespace GrpcAspNetCoreServer
 {
     public class Startup
     {
+        private readonly IConfiguration _config;
+
+        public Startup(IConfiguration config)
+        {
+            _config = config;
+        }
+
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddGrpc();
+            services.AddGrpc(o =>
+            {
+#if NET5_0 || NET6_0
+                // Small performance benefit to not add catch-all routes to handle UNIMPLEMENTED for unknown services
+                o.IgnoreUnknownServices = true;
+#endif
+            });
+            services.Configure<RouteOptions>(c =>
+            {
+                // Small performance benefit to skip checking for security metadata on endpoint
+                c.SuppressCheckForUnhandledSecurityMetadata = true;
+            });
+            services.AddSingleton<BenchmarkServiceImpl>();
             services.AddControllers();
 
-#if CLIENT_CERTIFICATE_AUTHENTICATION
-            services.AddAuthorization();
-            services.AddAuthentication(CertificateAuthenticationDefaults.AuthenticationScheme)
-                .AddCertificate(options =>
-                {
-                    // Not recommended in production environments. The example is using a self-signed test certificate.
-                    options.RevocationMode = X509RevocationMode.NoCheck;
-                    options.AllowedCertificateTypes = CertificateTypes.All;
-                });
-#endif
-#if GRPC_WEB
-            services.AddGrpcWeb(o => o.GrpcWebEnabled = true);
+#if NET5_0 || NET6_0
+            bool.TryParse(_config["enableCertAuth"], out var enableCertAuth);
+            if (enableCertAuth)
+            {
+                services.AddAuthorization();
+                services.AddAuthentication(CertificateAuthenticationDefaults.AuthenticationScheme)
+                    .AddCertificate(options =>
+                    {
+                        // Not recommended in production environments. The example is using a self-signed test certificate.
+                        options.RevocationMode = X509RevocationMode.NoCheck;
+                        options.AllowedCertificateTypes = CertificateTypes.All;
+                    });
+            }
 #endif
         }
 
@@ -62,34 +83,45 @@ namespace GrpcAspNetCoreServer
 
             app.UseRouting();
 
-#if CLIENT_CERTIFICATE_AUTHENTICATION
-            app.UseAuthentication();
-            app.UseAuthorization();
+#if NET5_0 || NET6_0
+            bool.TryParse(_config["enableCertAuth"], out var enableCertAuth);
+            if (enableCertAuth)
+            {
+                app.UseAuthentication();
+                app.UseAuthorization();
+            }
 #endif
 
 #if GRPC_WEB
-            app.UseGrpcWeb();
+            bool.TryParse(_config["enableGrpcWeb"], out var enableGrpcWeb);
+
+            if (enableGrpcWeb)
+            {
+                app.UseGrpcWeb(new GrpcWebOptions { DefaultEnabled = true });
+            }
 #endif
+
+            app.UseMiddleware<ServiceProvidersMiddleware>();
 
             app.UseEndpoints(endpoints =>
             {
-                endpoints.MapGrpcService<BenchmarkServiceImpl>();
+                ConfigureAuthorization(endpoints.MapGrpcService<BenchmarkServiceImpl>());
 
-                endpoints.MapControllers();
+                ConfigureAuthorization(endpoints.MapControllers());
                 
-                endpoints.MapGet("/", context =>
+                ConfigureAuthorization(endpoints.MapGet("/", context =>
                 {
                     return context.Response.WriteAsync("Benchmark Server");
-                });
+                }));
 
-                endpoints.MapPost("/unary", async context =>
+                ConfigureAuthorization(endpoints.MapPost("/unary", async context =>
                 {
                     MemoryStream ms = new MemoryStream();
                     await context.Request.Body.CopyToAsync(ms);
                     ms.Seek(0, SeekOrigin.Begin);
 
                     JsonSerializer serializer = new JsonSerializer();
-                    var message = serializer.Deserialize<SimpleRequest>(new JsonTextReader(new StreamReader(ms)));
+                    var message = serializer.Deserialize<SimpleRequest>(new JsonTextReader(new StreamReader(ms)))!;
 
                     ms.Seek(0, SeekOrigin.Begin);
                     using (var writer = new JsonTextWriter(new StreamWriter(ms, Encoding.UTF8, 1024, true)))
@@ -101,8 +133,19 @@ namespace GrpcAspNetCoreServer
 
                     ms.Seek(0, SeekOrigin.Begin);
                     await ms.CopyToAsync(context.Response.Body);
-                });
+                }));
             });
+        }
+
+        private void ConfigureAuthorization(IEndpointConventionBuilder builder)
+        {
+#if NET5_0 || NET6_0
+            bool.TryParse(_config["enableCertAuth"], out var enableCertAuth);
+            if (enableCertAuth)
+            {
+                builder.RequireAuthorization();
+            }
+#endif
         }
     }
 }

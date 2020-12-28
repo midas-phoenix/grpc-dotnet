@@ -6,11 +6,10 @@
 
     <IsGrpcPublishedPackage>true</IsGrpcPublishedPackage>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <TargetFrameworks>netstandard2.1;net5.0</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Grpc.Core.Api" Version="$(GrpcPackageVersion)" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftExtensionsPackageVersion)" />
     <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="$(SystemDiagnosticsDiagnosticSourcePackageVersion)" />
   </ItemGroup>
@@ -18,6 +17,8 @@
   <ItemGroup>
     <Compile Include="..\Shared\CommonGrpcProtocolHelpers.cs" Link="Internal\CommonGrpcProtocolHelpers.cs" />
     <Compile Include="..\Shared\DefaultDeserializationContext.cs" Link="Internal\DefaultDeserializationContext.cs" />
+    <Compile Include="..\Shared\HttpHandlerFactory.cs" Link="Internal\HttpHandlerFactory.cs" />
+    <Compile Include="..\Shared\TelemetryHeaderHandler.cs" Link="Internal\TelemetryHeaderHandler.cs" />
   </ItemGroup>
 
   <ItemGroup>

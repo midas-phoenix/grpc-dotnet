@@ -26,6 +26,7 @@ using Grpc.Gateway.Testing;
 using Grpc.Net.Client;
 using Grpc.Net.Client.Web;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 
 namespace Grpc.AspNetCore.FunctionalTests.Web.Client
@@ -47,7 +48,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Client
         {
             // Arrage
             var httpClient = CreateGrpcWebClient();
-            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress, new GrpcChannelOptions
+            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress!, new GrpcChannelOptions
             {
                 HttpClient = httpClient,
                 LoggerFactory = LoggerFactory
@@ -83,25 +84,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Client
         public async Task SendValidRequest_ServerAbort_ClientThrowsAbortException()
         {
             // Arrage
-            SetExpectedErrorsFilter(r =>
-            {
-                if (r.EventId.Name == "RpcConnectionError" &&
-                    r.Message == "Error status code 'Aborted' raised.")
-                {
-                    return true;
-                }
-
-                if (r.EventId.Name == "GrpcStatusError" &&
-                    r.Message == "Call failed with gRPC error status. Status code: 'Aborted', Message: 'Aborted from server side.'.")
-                {
-                    return true;
-                }
-
-                return false;
-            });
-
             var httpClient = CreateGrpcWebClient();
-            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress, new GrpcChannelOptions
+            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress!, new GrpcChannelOptions
             {
                 HttpClient = httpClient,
                 LoggerFactory = LoggerFactory
@@ -121,30 +105,27 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Client
             Assert.IsTrue(await call.ResponseStream.MoveNext(CancellationToken.None).DefaultTimeout());
             Assert.AreEqual("test", call.ResponseStream.Current.Message);
 
-            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext(CancellationToken.None));
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext(CancellationToken.None)).DefaultTimeout();
+
             Assert.AreEqual(StatusCode.Aborted, ex.StatusCode);
             Assert.AreEqual("Aborted from server side.", ex.Status.Detail);
 
             Assert.AreEqual(StatusCode.Aborted, call.GetStatus().StatusCode);
+
+            // It is possible get into a situation where the response stream finishes slightly before the call.
+            // Small delay to ensure call logging is complete.
+            await Task.Delay(50);
+
+            AssertHasLog(LogLevel.Information, "GrpcStatusError", "Call failed with gRPC error status. Status code: 'Aborted', Message: 'Aborted from server side.'.");
+            AssertHasLogRpcConnectionError(StatusCode.Aborted, "Aborted from server side.");
         }
 
         [Test]
         public async Task SendValidRequest_ClientAbort_ClientThrowsCancelledException()
         {
             // Arrage
-            SetExpectedErrorsFilter(r =>
-            {
-                if (r.EventId.Name == "GrpcStatusError" &&
-                    r.Message == "Call failed with gRPC error status. Status code: 'Cancelled', Message: 'Call canceled by the client.'.")
-                {
-                    return true;
-                }
-
-                return false;
-            });
-
             var httpClient = CreateGrpcWebClient();
-            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress, new GrpcChannelOptions
+            var channel = GrpcChannel.ForAddress(httpClient.BaseAddress!, new GrpcChannelOptions
             {
                 HttpClient = httpClient,
                 LoggerFactory = LoggerFactory
@@ -167,11 +148,17 @@ namespace Grpc.AspNetCore.FunctionalTests.Web.Client
 
             cts.Cancel();
 
-            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext(CancellationToken.None));
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseStream.MoveNext(CancellationToken.None)).DefaultTimeout();
             Assert.AreEqual(StatusCode.Cancelled, ex.StatusCode);
             Assert.AreEqual("Call canceled by the client.", ex.Status.Detail);
 
             Assert.AreEqual(StatusCode.Cancelled, call.GetStatus().StatusCode);
+
+            // It is possible get into a situation where the response stream finishes slightly before the call.
+            // Small delay to ensure call logging is complete.
+            await Task.Delay(50);
+
+            AssertHasLog(LogLevel.Information, "GrpcStatusError", "Call failed with gRPC error status. Status code: 'Cancelled', Message: 'Call canceled by the client.'.");
         }
     }
 }

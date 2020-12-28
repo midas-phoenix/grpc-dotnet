@@ -22,6 +22,7 @@ using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 using Grpc.Net.Client.Web.Internal;
+using Grpc.Tests.Shared;
 using NUnit.Framework;
 
 namespace Grpc.Net.Client.Tests.Web
@@ -44,6 +45,32 @@ namespace Grpc.Net.Client.Tests.Web
             // Assert
             var base64 = Encoding.UTF8.GetString(ms.ToArray());
             CollectionAssert.AreEqual(data, Convert.FromBase64String(base64));
+        }
+
+        [Test]
+        public async Task WriteAsync_VeryLargeData_Written()
+        {
+            // Arrange
+            var ms = new MemoryStream();
+            var gprcWebStream = new Base64RequestStream(ms);
+
+            var s = string.Create<object>(16384, null!, (s, o) =>
+            {
+                for (var i = 0; i < s.Length; i++)
+                {
+                    s[i] = Convert.ToChar(i % 10);
+                }
+            });
+            var data = Encoding.UTF8.GetBytes(s);
+
+            // Act
+            await gprcWebStream.WriteAsync(data).AsTask().DefaultTimeout();
+            await gprcWebStream.FlushAsync().DefaultTimeout();
+
+            // Assert
+            var base64 = Encoding.UTF8.GetString(ms.ToArray());
+            var result = Convert.FromBase64String(base64);
+            CollectionAssert.AreEqual(data, result);
         }
 
         [Test]
@@ -98,8 +125,8 @@ namespace Grpc.Net.Client.Tests.Web
             var data = Encoding.UTF8.GetBytes("Hello world");
 
             // Act
-            await gprcWebStream.WriteAsync(data);
-            await gprcWebStream.FlushAsync();
+            await gprcWebStream.WriteAsync(data).AsTask().DefaultTimeout();
+            await gprcWebStream.FlushAsync().DefaultTimeout();
 
             // Assert
             var base64 = Encoding.UTF8.GetString(ms.ToArray());

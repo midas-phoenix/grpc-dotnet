@@ -27,6 +27,7 @@ using Greet;
 using Grpc.Core;
 using Grpc.Net.Client.Internal;
 using Grpc.Net.Client.Tests.Infrastructure;
+using Grpc.Shared;
 using Grpc.Tests.Shared;
 using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
@@ -67,18 +68,18 @@ namespace Grpc.Net.Client.Tests
             Assert.AreEqual(new Version(2, 0), httpRequestMessage!.Version);
             Assert.AreEqual(HttpMethod.Post, httpRequestMessage.Method);
             Assert.AreEqual(new Uri("https://localhost/ServiceName/MethodName"), httpRequestMessage.RequestUri);
-            Assert.AreEqual(new MediaTypeHeaderValue("application/grpc"), httpRequestMessage.Content.Headers.ContentType);
+            Assert.AreEqual(new MediaTypeHeaderValue("application/grpc"), httpRequestMessage.Content?.Headers?.ContentType);
             Assert.AreEqual(GrpcProtocolConstants.TEHeaderValue, httpRequestMessage.Headers.TE.Single().Value);
             Assert.AreEqual("identity,gzip", httpRequestMessage.Headers.GetValues(GrpcProtocolConstants.MessageAcceptEncodingHeader).Single());
 
-            var userAgent = httpRequestMessage.Headers.UserAgent.Single();
-            Assert.AreEqual("grpc-dotnet", userAgent.Product.Name);
-            Assert.IsTrue(!string.IsNullOrEmpty(userAgent.Product.Version));
+            var userAgent = httpRequestMessage.Headers.UserAgent.Single()!;
+            Assert.AreEqual("grpc-dotnet", userAgent.Product?.Name);
+            Assert.IsTrue(!string.IsNullOrEmpty(userAgent.Product?.Version));
 
             // Santity check that the user agent doesn't have the git hash in it and isn't too long.
             // Sending a long user agent with each call has performance implications.
-            Assert.IsTrue(!userAgent.Product.Version.Contains('+'));
-            Assert.IsTrue(userAgent.Product.Version.Length <= 10);
+            Assert.IsFalse(userAgent.Product!.Version!.Contains('+'));
+            Assert.IsTrue(userAgent.Product!.Version!.Length <= 10);
         }
 
         [Test]
@@ -111,8 +112,8 @@ namespace Grpc.Net.Client.Tests
             Assert.IsNotNull(content);
 
             var requestContent = await content!.ReadAsStreamAsync().DefaultTimeout();
-            var requestMessage = await requestContent.ReadMessageAsync(
-                NullLogger.Instance,
+            var requestMessage = await StreamSerializationHelper.ReadMessageAsync(
+                requestContent,
                 ClientTestHelpers.ServiceMethod.RequestMarshaller.ContextualDeserializer,
                 GrpcProtocolConstants.IdentityGrpcEncoding,
                 maximumMessageSize: null,
@@ -120,7 +121,7 @@ namespace Grpc.Net.Client.Tests
                 singleMessage: true,
                 CancellationToken.None).AsTask().DefaultTimeout();
 
-            Assert.AreEqual("World", requestMessage.Name);
+            Assert.AreEqual("World", requestMessage!.Name);
         }
 
         [Test]
@@ -158,14 +159,17 @@ namespace Grpc.Net.Client.Tests
             // Act
             var call = invoker.AsyncUnaryCall<HelloRequest, HelloReply>(ClientTestHelpers.ServiceMethod, string.Empty, new CallOptions(), new HelloRequest());
             var headers = await call.ResponseHeadersAsync.DefaultTimeout();
-            var response = await ExceptionAssert.ThrowsAsync<InvalidOperationException>(() => call.ResponseAsync).DefaultTimeout();
+            var ex = await ExceptionAssert.ThrowsAsync<RpcException>(() => call.ResponseAsync).DefaultTimeout();
 
             // Assert
             Assert.NotNull(responseMessage);
             Assert.IsFalse(responseMessage!.TrailingHeaders.Any()); // sanity check that there are no trailers
 
-            Assert.AreEqual(StatusCode.OK, call.GetStatus().StatusCode);
-            Assert.AreEqual("Detail!", call.GetStatus().Detail);
+            Assert.AreEqual(StatusCode.Internal, ex.Status.StatusCode);
+            Assert.AreEqual("Failed to deserialize response message.", ex.Status.Detail);
+
+            Assert.AreEqual(StatusCode.Internal, call.GetStatus().StatusCode);
+            Assert.AreEqual("Failed to deserialize response message.", call.GetStatus().Detail);
 
             Assert.AreEqual(0, headers.Count);
             Assert.AreEqual(0, call.GetTrailers().Count);

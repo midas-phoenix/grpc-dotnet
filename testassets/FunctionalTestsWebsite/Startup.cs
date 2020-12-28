@@ -53,7 +53,6 @@ namespace FunctionalTestsWebsite
                 {
                     options.ResponseCompressionAlgorithm = "gzip";
                 });
-            services.AddGrpcWeb(o => o.GrpcWebEnabled = true);
             services.AddHttpContextAccessor();
 
             services
@@ -89,7 +88,7 @@ namespace FunctionalTestsWebsite
                     builder.AllowAnyOrigin();
                     builder.AllowAnyMethod();
                     builder.AllowAnyHeader();
-                    builder.WithExposedHeaders("Grpc-Status", "Grpc-Message");
+                    builder.WithExposedHeaders("Grpc-Status", "Grpc-Message", "Grpc-Encoding", "Grpc-Accept-Encoding");
                 });
             });
 
@@ -126,16 +125,15 @@ namespace FunctionalTestsWebsite
             app.UseRouting();
 
             app.UseAuthorization();
-            app.UseGrpcWeb();
+            app.UseGrpcWeb(new GrpcWebOptions { DefaultEnabled = true });
             app.UseCors();
 
             app.UseEndpoints(endpoints =>
             {
-                // Bind via reflection
+                endpoints.MapGrpcService<SecondGreeterService>().RequireCors("FunctionalTests");
                 endpoints.MapGrpcService<ChatterService>();
                 endpoints.MapGrpcService<CounterService>();
                 endpoints.MapGrpcService<AuthorizedGreeter>();
-                endpoints.MapGrpcService<SecondGreeterService>().RequireCors("FunctionalTests");
                 endpoints.MapGrpcService<LifetimeService>();
                 endpoints.MapGrpcService<SingletonCounterService>();
                 endpoints.MapGrpcService<NestedService>();
@@ -145,6 +143,8 @@ namespace FunctionalTestsWebsite
                 endpoints.MapGrpcService<StreamService>();
                 endpoints.MapGrpcService<RacerService>();
                 endpoints.MapGrpcService<EchoService>();
+                endpoints.MapGrpcService<IssueService>();
+                endpoints.MapGrpcService<TesterService>();
 
                 endpoints.DataSources.Add(endpoints.ServiceProvider.GetRequiredService<DynamicEndpointDataSource>());
 

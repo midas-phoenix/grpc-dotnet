@@ -28,6 +28,7 @@ using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.AspNetCore.Server.Internal;
 using Grpc.Core;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 
 namespace Grpc.AspNetCore.FunctionalTests.Server
@@ -125,22 +126,98 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             Assert.AreNotEqual(0, messageCount);
 
             response.AssertTrailerStatus(StatusCode.DeadlineExceeded, "Deadline Exceeded");
+
+            Assert.True(HasLog(LogLevel.Debug, "DeadlineExceeded", "Request with timeout of 00:00:00.2000000 has exceeded its deadline."));
+
+            await TestHelpers.AssertIsTrueRetryAsync(
+                () => HasLog(LogLevel.Trace, "DeadlineStopped", "Request deadline stopped."),
+                "Missing deadline stopped log.").DefaultTimeout();
         }
 
         [Test]
-        public async Task UnaryMethodDeadlineExceeded()
+        public async Task UnaryMethodErrorWithinDeadline()
         {
-            static async Task<HelloReply> WaitUntilDeadline(HelloRequest request, ServerCallContext context)
+            static async Task<HelloReply> ThrowErrorWithinDeadline(HelloRequest request, ServerCallContext context)
             {
-                while (!context.CancellationToken.IsCancellationRequested)
+                await Task.Delay(10);
+                throw new InvalidOperationException("An error.");
+            }
+
+            // Arrange
+            SetExpectedErrorsFilter(writeContext =>
+            {
+                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName)
                 {
-                    await Task.Delay(50);
+                    // Deadline happened before write
+                    if (writeContext.EventId.Name == "ErrorExecutingServiceMethod" &&
+                        writeContext.State.ToString() == "Error when executing service method 'ThrowErrorWithinDeadline'." &&
+                        writeContext.Exception!.Message == "An error.")
+                    {
+                        return true;
+                    }
                 }
 
+                return false;
+            });
+
+            var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(ThrowErrorWithinDeadline, nameof(ThrowErrorWithinDeadline));
+
+            var requestMessage = new HelloRequest
+            {
+                Name = "World"
+            };
+
+            var requestStream = new MemoryStream();
+            MessageHelpers.WriteMessage(requestStream, requestMessage);
+
+            var httpRequest = GrpcHttpHelper.Create(method.FullName);
+            httpRequest.Headers.Add(GrpcProtocolConstants.TimeoutHeader, "200m");
+            httpRequest.Content = new GrpcStreamContent(requestStream);
+
+            // Act
+            var response = await Fixture.Client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead).DefaultTimeout();
+
+            // Assert
+            response.AssertIsSuccessfulGrpcRequest();
+            response.AssertTrailerStatus(StatusCode.Unknown, "Exception was thrown by handler. InvalidOperationException: An error.");
+
+            Assert.True(HasLog(LogLevel.Trace, "DeadlineStopped", "Request deadline stopped."));
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task UnaryMethodDeadlineExceeded(bool throwErrorOnCancellation)
+        {
+            async Task<HelloReply> WaitUntilDeadline(HelloRequest request, ServerCallContext context)
+            {
+                try
+                {
+                    await Task.Delay(1000, context.CancellationToken);
+                }
+                catch (OperationCanceledException) when (!throwErrorOnCancellation)
+                {
+                    // nom nom nom
+                }
+                
                 return new HelloReply();
             }
 
-            var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(WaitUntilDeadline, nameof(WaitUntilDeadline));
+            // Arrange
+            SetExpectedErrorsFilter(writeContext =>
+            {
+                if (writeContext.LoggerName == TestConstants.ServerCallHandlerTestName)
+                {
+                    if (writeContext.EventId.Name == "ErrorExecutingServiceMethod" &&
+                        writeContext.State.ToString() == "Error when executing service method 'WaitUntilDeadline-True'.")
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            });
+
+            var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(WaitUntilDeadline, $"{nameof(WaitUntilDeadline)}-{throwErrorOnCancellation}");
 
             var requestMessage = new HelloRequest
             {
@@ -160,6 +237,12 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
             // Assert
             response.AssertIsSuccessfulGrpcRequest();
             response.AssertTrailerStatus(StatusCode.DeadlineExceeded, "Deadline Exceeded");
+
+            Assert.True(HasLog(LogLevel.Debug, "DeadlineExceeded", "Request with timeout of 00:00:00.2000000 has exceeded its deadline."));
+            
+            await TestHelpers.AssertIsTrueRetryAsync(
+                () => HasLog(LogLevel.Trace, "DeadlineStopped", "Request deadline stopped."),
+                "Missing deadline stopped log.").DefaultTimeout();
         }
 
         [Test]
@@ -185,8 +268,7 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
                 {
                     // Deadline happened before write
                     if (writeContext.EventId.Name == "ErrorExecutingServiceMethod" &&
-                        writeContext.State.ToString() == "Error when executing service method 'WriteUntilError'." &&
-                        writeContext.Exception!.Message == "Cannot write message after request is complete.")
+                        writeContext.State.ToString() == "Error when executing service method 'WriteUntilError'.")
                     {
                         return true;
                     }
@@ -243,13 +325,14 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
                         break;
                     }
                 }
-
             });
 
             await readTask.DefaultTimeout();
 
             Assert.AreNotEqual(0, messageCount);
             response.AssertTrailerStatus(StatusCode.DeadlineExceeded, "Deadline Exceeded");
+
+            Assert.True(HasLog(LogLevel.Debug, "DeadlineExceeded", "Request with timeout of 00:00:00.2000000 has exceeded its deadline."));
 
             // The server has completed the response but is still running
             // Allow time for the server to complete
@@ -258,10 +341,14 @@ namespace Grpc.AspNetCore.FunctionalTests.Server
                 var errorLogged = Logs.Any(r =>
                     r.EventId.Name == "ErrorExecutingServiceMethod" &&
                     r.State.ToString() == "Error when executing service method 'WriteUntilError'." &&
-                    (r.Exception!.Message == "Cannot write message after request is complete." || r.Exception!.Message == "Writing is not allowed after writer was completed."));
+                    (r.Exception!.Message == "Can't write the message because the request is complete." || r.Exception!.Message == "Writing is not allowed after writer was completed."));
 
                 return errorLogged;
-            }, "Expected error not thrown.");
+            }, "Expected error not thrown.").DefaultTimeout();
+
+            await TestHelpers.AssertIsTrueRetryAsync(
+                () => HasLog(LogLevel.Trace, "DeadlineStopped", "Request deadline stopped."),
+                "Missing deadline stopped log.").DefaultTimeout();
         }
     }
 }

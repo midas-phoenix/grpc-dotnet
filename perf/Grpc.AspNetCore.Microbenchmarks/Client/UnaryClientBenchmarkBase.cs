@@ -56,7 +56,7 @@ namespace Grpc.AspNetCore.Microbenchmarks.Client
 
             var handler = TestHttpMessageHandler.Create(async r =>
             {
-                await r.Content.CopyToAsync(Stream.Null);
+                await r.Content!.CopyToAsync(Stream.Null);
 
                 var content = new ByteArrayContent(requestMessage);
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/grpc");
@@ -64,11 +64,9 @@ namespace Grpc.AspNetCore.Microbenchmarks.Client
                 return ResponseUtils.CreateResponse(HttpStatusCode.OK, content, grpcEncoding: ResponseCompressionAlgorithm);
             });
 
-            var httpClient = new HttpClient(handler);
-
             var channel = GrpcChannel.ForAddress("http://localhost", new GrpcChannelOptions
             {
-                HttpClient = httpClient,
+                HttpHandler = handler,
                 CompressionProviders = CompressionProviders
             });
 

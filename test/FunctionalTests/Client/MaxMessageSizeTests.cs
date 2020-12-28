@@ -22,6 +22,7 @@ using Grpc.AspNetCore.FunctionalTests.Infrastructure;
 using Grpc.Core;
 using Grpc.Net.Client;
 using Grpc.Tests.Shared;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 
 namespace Grpc.AspNetCore.FunctionalTests.Client
@@ -48,20 +49,13 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
                     return true;
                 }
 
-                if (writeContext.LoggerName == "Grpc.Net.Client.Internal.GrpcCall" &&
-                    writeContext.EventId.Name == "GrpcStatusError" &&
-                    writeContext.Message == "Call failed with gRPC error status. Status code: 'ResourceExhausted', Message: 'Received message exceeds the maximum configured message size.'.")
-                {
-                    return true;
-                }
-
                 return false;
             });
 
             var method = Fixture.DynamicGrpc.AddUnaryMethod<HelloRequest, HelloReply>(ReturnLargeMessage);
 
             var channel = CreateChannel();
-            channel.DisableClientDeadlineTimer = true;
+            channel.DisableClientDeadline = true;
 
             var client = TestClientFactory.Create(channel, method);
 
@@ -71,6 +65,8 @@ namespace Grpc.AspNetCore.FunctionalTests.Client
             // Assert
             Assert.AreEqual(StatusCode.ResourceExhausted, ex.StatusCode);
             Assert.AreEqual("Received message exceeds the maximum configured message size.", ex.Status.Detail);
+
+            AssertHasLog(LogLevel.Information, "GrpcStatusError", "Call failed with gRPC error status. Status code: 'ResourceExhausted', Message: 'Received message exceeds the maximum configured message size.'.");
         }
     }
 }

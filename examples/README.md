@@ -6,22 +6,21 @@ If you are brand new to gRPC on .NET a good place to start is the getting starte
 
 ## [Greeter](./Greeter)
 
-The greeter shows how to create unary (non-streaming) and server streaming gRPC methods in ASP.NET Core, and call them from a client.
+The greeter shows how to create unary (non-streaming) gRPC methods in ASP.NET Core, and call them from a client.
 
 ##### Scenarios:
 
 * Unary call
-* Server streaming call
-* Client canceling a call
 
 ## [Counter](./Counter)
 
-The counter shows how to create unary (non-streaming) and client streaming gRPC methods in ASP.NET Core, and call them from a client.
+The counter shows how to create unary (non-streaming), client streaming and server streaming gRPC methods in ASP.NET Core, and call them from a client.
 
 ##### Scenarios:
 
 * Unary call
 * Client streaming call
+* Server streaming call
 
 ## [Mailer](./Mailer)
 
@@ -31,9 +30,9 @@ The mailer shows how to create a bi-directional streaming gRPC method in ASP.NET
 
 * Bi-directional streaming call
 
-## [Logger](./Logger)
+## [Interceptor](./Interceptor)
 
-The logger shows how to use interceptors on the client and server. The client interceptor adds additional metadata to each call and the server interceptor logs that metadata on the server.
+The interceptor shows how to use gRPC interceptors on the client and server. The client interceptor adds additional metadata to each call and the server interceptor logs that metadata on the server.
 
 ##### Scenarios:
 
@@ -119,9 +118,7 @@ dotnet run --EnableOpenTelemetry=true
 
 ## [Tester](./Tester)
 
-The tester shows how to test gRPC services. The unit tests create and test a gRPC service directly. The functional tests show how to use [Microsoft.AspNetCore.TestHost](https://www.nuget.org/packages/Microsoft.AspNetCore.TestHost/) to host a gRPC service with an in-memory test server and call it using a gRPC client. The functional tests write client and server logs to the test output.
-
-> **NOTE:** There is a known issue in ASP.NET Core 3.0 that prevents functional testing of bidirectional gRPC methods. Bidirectional gRPC methods can still be unit tested.
+The tester shows how to test gRPC services. The unit tests create and test a gRPC service directly. The functional tests show how to use [Microsoft.AspNetCore.TestHost](https://www.nuget.org/packages/Microsoft.AspNetCore.TestHost/) (version 3.1.2 or greater required) to host a gRPC service with an in-memory test server and call it using a gRPC client. The functional tests write client and server logs to the test output.
 
 ##### Scenarios:
 
@@ -147,6 +144,37 @@ The vigor example shows how to integrate [ASP.NET Core health checks](https://do
 * Integrate [ASP.NET Core health checks](https://docs.microsoft.com/aspnet/core/host-and-deploy/health-checks) with gRPC health checks
 * Calling service with `Grpc.HealthCheck` client
 
+## [Compressor](./Compressor)
+
+The compressor example shows how to enable compression of gRPC request and response messages using gzip.
+
+> **IMPORTANT:** Using compression with dynamically generated content can lead to security problems such as the [CRIME](https://wikipedia.org/wiki/CRIME_(security_exploit)) and [BREACH](https://wikipedia.org/wiki/BREACH_(security_exploit)) attacks.
+
+##### Scenarios:
+
+* Compression of request messages. gRPC clients should use the `grpc-internal-encoding-request` metadata value.
+* Compression of response messages. gRPC services should configure the `ResponseCompressionAlgorithm` setting.
+
+## [Liber](./Liber)
+
+The liber example shows how to add Protobuf messages to a shared .NET project. Sharing generated messages is an alternative to each project generating their own copy. Protobuf messages in a shared project makes it easier to write reusable libraries that use messages.
+
+This example has two proto files:
+
+* *common.proto* contains a common `Name` message type.
+* *greet.proto* has a service definition. It imports *common.proto* and uses the `Name` message.
+
+The `Name` .NET type is generated from *common.proto* in the common project and is shared throughout the solution:
+
+* *Common.csproj* uses Grpc.Tools to generate messages contained in *common.proto*.
+* *Client.csproj* uses Grpc.Tools to generate the gRPC client for *greet.proto*. There is no `<Protobuf>` reference for *common.proto* because we don't want its messages generated in this project. Instead the .NET types for its messages are referenced from the common project.
+* *Server.csproj* uses Grpc.Tools to generate the gRPC service for *greet.proto*. It also references the common project.
+
+##### Scenarios:
+
+* Add Protobuf messages to shared .NET projects
+* Use shared messages in gRPC services
+
 ## [Browser](./Browser)
 
 The browser example shows how to use [gRPC-Web](https://github.com/grpc/grpc-web) with ASP.NET Core to call a gRPC service from a browser. Browser apps have limited HTTP/2 features and need to use gRPC-Web instead. This example requires [npm and NodeJS](https://nodejs.org/) to be installed on your computer.
@@ -162,13 +190,71 @@ The gRPC-Web JavaScript client was generated from *greet.proto* using [`protoc`]
 
 The blazor example shows how to call a gRPC service from a Blazor WebAssembly app. Because Blazor WebAssembly is hosted in the browser it has limited HTTP/2 features and needs to use gRPC-Web instead.
 
-**Known Blazor WebAssembly issues:**
-
-* Server streaming requires setting a variable via reflection on startup - https://github.com/mono/mono/issues/18718#issuecomment-582667900
-* Server streaming call cancellation isn't canceled on the server - https://github.com/mono/mono/issues/18717
-
 ##### Scenarios:
 
 * Configure ASP.NET Core server to support `grpc-web` and `grpc-web-text` content types
 * Configure .NET gRPC client in Blazor to use gRPC-Web
+* Get service address using `IConfiguration` and `appsettings.json`
 * Call gRPC services with Blazor WebAssembly from a browser
+
+## [Spar](./Spar)
+
+The spar example shows how to call a gRPC service from a single page application (SPA) and make cross-origin gRPC-Web requests. The SPA uses [Vue.js](https://vuejs.org/) and [gRPC-Web](https://github.com/grpc/grpc-web). The server is configured to support [Cross Origin Resource Sharing (CORS)](https://docs.microsoft.com/aspnet/core/security/cors). This example requires [npm and NodeJS](https://nodejs.org/) to be installed on your computer.
+
+The gRPC-Web JavaScript client was generated from *greet.proto* using [`protoc`](https://github.com/protocolbuffers/protobuf/releases) with the [`protoc-gen-grpc-web`](https://github.com/grpc/grpc-web/releases) plugin.
+
+##### Scenarios:
+
+* Configure ASP.NET Core server to support `grpc-web` and `grpc-web-text` content types
+* Configure ASP.NET Core server to enable gRPC-Web cross-origin requests (CORS)
+* Call gRPC services with JavaScript from a SPA
+
+## [Microservicer](./Microservicer)
+
+The microservicer example shows how to use gRPC in a solution that contains multiple web apps. The backend app hosts a gRPC service that is called by the frontend app. The frontend app uses gRPC client factory to create a client an inject it into the MVC controller with dependency injection.
+
+This example uses [tye](https://github.com/dotnet/tye) to run the solution and for service discovery. When `tye run` command is run:
+
+1. Tye builds and runs the frontend and backend apps.
+2. Tye injects service addresses into each app. The backend app address is accessible via `IConfiguration`.
+3. The frontend app configures the gRPC client with the backend address in *Startup.cs*.
+
+[Install the Tye dotnet tool](https://github.com/dotnet/tye/blob/master/docs/getting_started.md) and then execute `tye run` in the *examples/Microservicer* directory.
+
+##### Scenarios:
+
+* Microservices
+* Client factory
+* Mixing frontend RESTful API with backend gRPC services
+* App development with [Tye](https://github.com/dotnet/tye)
+
+## [Transporter](./Transporter)
+
+**Requirements:**
+* .NET 5 or later
+* Linux, MacOS or a [modern version of Windows](https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/)
+
+The transporter example shows how to use gRPC over non-TCP transports. This example uses a [Unix domain socket (UDS)](https://en.wikipedia.org/wiki/Unix_domain_socket) to send gRPC messages between the client and server.
+
+To use gRPC with UDS:
+
+1. The client creates a channel with a `ConnectCallback`. The callback connects to a specified UDS endpoint.
+2. The server configures a UDS endpoint with [KestrelServerOptions.ListenUnixSocket](https://docs.microsoft.com/dotnet/api/microsoft.aspnetcore.server.kestrel.core.kestrelserveroptions.listenunixsocket) in *Program.cs*.
+
+##### Scenarios:
+
+* Unix domain sockets
+* SocketsHttpHandler.ConnectCallback
+* [KestrelServerOptions.ListenUnixSocket](https://docs.microsoft.com/dotnet/api/microsoft.aspnetcore.server.kestrel.core.kestrelserveroptions.listenunixsocket)
+
+## [Coder](./Coder)
+
+The coder example shows how to create a code-first gRPC service and client. This example uses [protobuf-net.Grpc](https://github.com/protobuf-net/protobuf-net.Grpc), a community project that adds code-first support to `Grpc.AspNetCore` and `Grpc.Net.Client`.
+
+Code-first is a good choice if an app is written entirely in .NET. Code contracts can't be used by other languages and cross-platform apps should use *.proto* contracts.
+
+##### Scenarios:
+
+* Configure [protobuf-net.Grpc](https://github.com/protobuf-net/protobuf-net.Grpc)
+* Create a code-first gRPC service
+* Create a code-first gRPC client

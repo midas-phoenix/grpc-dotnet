@@ -28,16 +28,44 @@ namespace Grpc.AspNetCore.Server
     public class GrpcServiceOptions
     {
         internal IList<ICompressionProvider>? _compressionProviders;
+        internal bool _maxReceiveMessageSizeConfigured;
+        internal int? _maxReceiveMessageSize;
+        internal bool _maxSendMessageSizeConfigured;
+        internal int? _maxSendMessageSize;
 
         /// <summary>
         /// Gets or sets the maximum message size in bytes that can be sent from the server.
+        /// Attempting to send a message that exceeds the configured maximum message size results in an exception.
+        /// <para>
+        /// A <c>null</c> value removes the maximum message size limit. Defaults to <c>null</c>.
+        /// </para>
         /// </summary>
-        public int? MaxSendMessageSize { get; set; }
+        public int? MaxSendMessageSize
+        {
+            get => _maxSendMessageSize;
+            set
+            {
+                _maxSendMessageSize = value;
+                _maxSendMessageSizeConfigured = true;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the maximum message size in bytes that can be received by the server.
+        /// If the server receives a message that exceeds this limit, it throws an exception.
+        /// <para>
+        /// A <c>null</c> value removes the maximum message size limit. Defaults to 4,194,304 (4 MB).
+        /// </para>
         /// </summary>
-        public int? MaxReceiveMessageSize { get; set; }
+        public int? MaxReceiveMessageSize
+        {
+            get => _maxReceiveMessageSize;
+            set
+            {
+                _maxReceiveMessageSize = value;
+                _maxReceiveMessageSizeConfigured = true;
+            }
+        }
 
         /// <summary>
         /// Gets or sets a value indicating whether detailed error messages are sent to the peer.
@@ -73,6 +101,13 @@ namespace Grpc.AspNetCore.Server
             }
             set => _compressionProviders = value;
         }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether gRPC should ignore calls to unknown services and methods.
+        /// If set to <c>true</c>, calls to unknown services and methods won't return an 'UNIMPLEMENTED' status,
+        /// and the request will pass to the next registered middleware in ASP.NET Core.
+        /// </summary>
+        public bool? IgnoreUnknownServices { get; set; }
 
         /// <summary>
         /// Get a collection of interceptors to be executed with every call. Interceptors are executed in order.
